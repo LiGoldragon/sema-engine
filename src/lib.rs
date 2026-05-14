@@ -20,7 +20,9 @@ pub use catalog::{Catalog, TableRegistration};
 pub use engine::{Engine, EngineOpen};
 pub use error::{Error, Result};
 pub use log::OperationLogEntry;
-pub use mutation::{Assertion, Mutation, MutationReceipt, Retraction};
+pub use mutation::{
+    Assertion, AtomicBatch, AtomicOperation, AtomicReceipt, Mutation, MutationReceipt, Retraction,
+};
 pub use query::{
     AggregatePlan, FieldSelection, KeyRange, PredicatePlan, QueryFilter, QueryPlan, QuerySnapshot,
     ReadOperator, ReadPlan, ReadPlanNode, RecursionMode, RuleSetRef, UnificationPlan,

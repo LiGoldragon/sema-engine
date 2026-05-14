@@ -26,7 +26,11 @@ authorization, domain validation, and their own databases.
 - `Assert` writes records through a registered record family.
 - `Mutate` replaces existing records through a registered record family.
 - `Retract` removes existing records through a registered record family.
+- `Atomic` commits one-table write bundles through a registered record
+  family under one `SnapshotId`.
 - `Mutate` and `Retract` reject missing records with typed errors.
+- `Atomic` rejects empty batches, duplicate keys, and missing mutation
+  or retraction records with typed errors before writing.
 - `Match` reads records through a registered record family.
 - `Validate` dry-runs executable read plans through a registered record
   family without mutating storage.
@@ -34,12 +38,19 @@ authorization, domain validation, and their own databases.
   `Validate` payloads.
 - `Constrain`, `Project`, `Aggregate`, `Infer`, and `Recurse` are sema-engine
   read-plan operators, not `signal-core` root verbs.
+- The `SignalVerb` spine is closed at seven roots: `Assert`, `Mutate`,
+  `Retract`, `Match`, `Subscribe`, `Atomic`, and `Validate`.
+- Schema/catalog operations are catalog data under the seven roots, not an
+  eighth `Structure` root.
 - Unsupported read-plan operators return typed `UnsupportedReadPlan` errors
   instead of pretending execution succeeded.
-- `Assert`, `Mutate`, and `Retract` write one operation-log entry in the same committed write
-  transaction as the domain record.
+- `Assert`, `Mutate`, and `Retract` write one operation-log entry in the
+  same committed write transaction as the domain record.
+- `Atomic` writes one operation-log entry for the bundle in the same
+  committed write transaction as the domain records.
 - `operation_log_range` returns bounded replay entries by `SnapshotId`.
 - `MutationReceipt` carries the committed `SnapshotId`.
+- `AtomicReceipt` carries the committed `SnapshotId` and operation count.
 - `QuerySnapshot` carries the latest observed `SnapshotId`.
 - `ValidationReceipt` carries the observed `SnapshotId` and record count.
 - `Validate` does not write operation-log entries.
@@ -48,6 +59,8 @@ authorization, domain validation, and their own databases.
 - `Subscribe` registers durable subscription metadata and returns an
   initial snapshot.
 - `Subscribe` emits deltas only after the mutation commit succeeds.
+- `Subscribe` emits one per-operation delta for an `Atomic` bundle after
+  the bundle commit succeeds; every delta shares the bundle `SnapshotId`.
 - Sink delivery is downstream of the commit and cannot roll back the
   mutation.
 - Subscription sinks choose detached or inline delivery. Detached is the
@@ -90,6 +103,11 @@ let family = engine.register_table(TableDescriptor::new(TableName::new("thoughts
 engine.assert(Assertion::new(family.clone(), thought))?;
 engine.mutate(Mutation::new(family.clone(), updated_thought))?;
 engine.retract(Retraction::new(family.clone(), retired_key))?;
+let batch = AtomicBatch::new(family.clone())
+    .assert(new_thought)
+    .mutate(latest_thought)
+    .retract(obsolete_key);
+engine.atomic(batch)?;
 let snapshot = engine.match_records(QueryPlan::all(family))?;
 let validation = engine.validate(QueryPlan::all(family))?;
 let _tables = engine.list_tables();
@@ -102,12 +120,13 @@ engine.storage_kernel().write(|transaction| {
 ```
 
 This is not the final query language. It proves the layering:
-registered record family, Signal `Assert`, `Mutate`, `Retract`, Signal `Match`,
-Signal `Validate`, executable `ReadPlan` nodes for all/key/range reads, typed
-query-algebra nodes for future constrain/project/aggregate/infer/recurse
-execution, typed rkyv values, operation-log cursor, bounded log replay, table
-introspection, best-effort post-commit subscription delivery for write verbs,
-and durable storage through `sema`.
+registered record family, Signal `Assert`, `Mutate`, `Retract`, `Atomic`,
+Signal `Match`, Signal `Validate`, executable `ReadPlan` nodes for
+all/key/range reads, typed query-algebra nodes for future
+constrain/project/aggregate/infer/recurse execution, typed rkyv values,
+operation-log cursor, bounded log replay, table introspection, best-effort
+post-commit subscription delivery for write verbs, and durable storage
+through `sema`.
 
 ## Package Order
 
@@ -115,10 +134,11 @@ and durable storage through `sema`.
 2. Operation log and snapshot identity. Landed for `Assert`, `Match`,
    and bounded replay.
 3. `QueryPlan` / `ReadPlan` / `MutationPlan` execution. Started: all rows,
-   exact key, and key range execute. `Constrain`, `Project`, `Aggregate`,
-   `Infer`, and `Recurse` exist as typed read-plan nodes and return typed
-   unsupported errors until execution semantics land. Mutation plans, indexes,
-   and executable algebra are still future work.
+   exact key, and key range execute. `AtomicBatch` is the first executable
+   write-bundle plan. `Constrain`, `Project`, `Aggregate`, `Infer`, and
+   `Recurse` exist as typed read-plan nodes and return typed unsupported
+   errors until execution semantics land. Indexes and wider executable
+   algebra are still future work.
 4. `Subscribe` primitive with post-commit delivery. First slice landed:
    durable registration, initial snapshot, post-commit deltas with detached
    and inline sink modes, and replay cursor witnesses. Durable failure

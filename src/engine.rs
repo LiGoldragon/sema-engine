@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use rkyv::api::high::HighDeserializer;
@@ -10,10 +11,10 @@ use sema::{Schema, SchemaVersion};
 
 use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
-    Catalog, DeltaKind, EngineStoredRecord, Error, InitialSnapshot, OperationLogEntry, QueryPlan,
-    QuerySnapshot, Result, Retraction, SequenceRange, SnapshotId, SubscriptionHandle,
-    SubscriptionId, SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink,
-    TableDescriptor, TableReference, TableRegistration,
+    AtomicBatch, AtomicOperation, Catalog, DeltaKind, EngineStoredRecord, Error, InitialSnapshot,
+    OperationLogEntry, QueryPlan, QuerySnapshot, Result, Retraction, SequenceRange, SnapshotId,
+    SubscriptionHandle, SubscriptionId, SubscriptionReceipt, SubscriptionRegistration,
+    SubscriptionSink, TableDescriptor, TableReference, TableRegistration,
 };
 
 const CATALOG: sema::Table<&'static str, TableRegistration> =
@@ -232,6 +233,120 @@ impl Engine {
         ))
     }
 
+    pub fn atomic<RecordValue>(
+        &self,
+        batch: AtomicBatch<RecordValue>,
+    ) -> Result<crate::AtomicReceipt>
+    where
+        RecordValue: EngineStoredRecord + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        self.ensure_registered(batch.table())?;
+        if batch.operations().is_empty() {
+            return Err(Error::EmptyAtomicBatch {
+                table: batch.table().name().as_str().to_owned(),
+            });
+        }
+
+        let mut effect_keys = HashSet::new();
+        let mut effects = Vec::new();
+        for operation in batch.operations() {
+            match operation {
+                AtomicOperation::Assert(record) => {
+                    let key = record.record_key();
+                    if !effect_keys.insert(key.clone()) {
+                        return Err(self.duplicate_atomic_key(batch.table(), &key));
+                    }
+                    effects.push(AtomicEffect::new(DeltaKind::Assert, key, record.clone()));
+                }
+                AtomicOperation::Mutate(record) => {
+                    let key = record.record_key();
+                    if !effect_keys.insert(key.clone()) {
+                        return Err(self.duplicate_atomic_key(batch.table(), &key));
+                    }
+                    if self
+                        .storage
+                        .read(|transaction| {
+                            batch
+                                .table()
+                                .sema_table()
+                                .get(transaction, key.to_owned_string())
+                        })?
+                        .is_none()
+                    {
+                        return Err(self.record_not_found(batch.table(), &key));
+                    }
+                    effects.push(AtomicEffect::new(DeltaKind::Mutate, key, record.clone()));
+                }
+                AtomicOperation::Retract(key) => {
+                    if !effect_keys.insert(key.clone()) {
+                        return Err(self.duplicate_atomic_key(batch.table(), key));
+                    }
+                    let Some(record) = self.storage.read(|transaction| {
+                        batch
+                            .table()
+                            .sema_table()
+                            .get(transaction, key.to_owned_string())
+                    })?
+                    else {
+                        return Err(self.record_not_found(batch.table(), key));
+                    };
+                    effects.push(AtomicEffect::new(DeltaKind::Retract, key.clone(), record));
+                }
+            }
+        }
+
+        let snapshot = self.next_snapshot()?;
+        let operation = OperationLogEntry::new(
+            snapshot,
+            signal_core::SignalVerb::Atomic,
+            *batch.table().name(),
+            None,
+        );
+        self.storage.write(|transaction| {
+            for operation in batch.operations() {
+                match operation {
+                    AtomicOperation::Assert(record) | AtomicOperation::Mutate(record) => {
+                        batch.table().sema_table().insert(
+                            transaction,
+                            record.record_key().to_owned_string(),
+                            record,
+                        )?;
+                    }
+                    AtomicOperation::Retract(key) => {
+                        let _removed = batch
+                            .table()
+                            .sema_table()
+                            .remove(transaction, key.to_owned_string())?;
+                    }
+                }
+            }
+            OPERATION_LOG.insert(transaction, snapshot.value(), &operation)?;
+            COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
+            Ok(())
+        })?;
+
+        for effect in &effects {
+            self.subscriptions.deliver_delta(
+                effect.kind(),
+                *batch.table().name(),
+                effect.key(),
+                snapshot,
+                effect.record(),
+            )?;
+        }
+
+        Ok(crate::AtomicReceipt::new(
+            signal_core::SignalVerb::Atomic,
+            *batch.table().name(),
+            snapshot,
+            batch.operation_count(),
+        ))
+    }
+
     pub fn match_records<RecordValue>(
         &self,
         query: QueryPlan<RecordValue>,
@@ -417,6 +532,17 @@ impl Engine {
         }
     }
 
+    fn duplicate_atomic_key<RecordValue>(
+        &self,
+        table: &TableReference<RecordValue>,
+        key: &crate::RecordKey,
+    ) -> Error {
+        Error::DuplicateAtomicKey {
+            table: table.name().as_str().to_owned(),
+            key: key.to_owned_string(),
+        }
+    }
+
     fn next_subscription_handle<RecordValue>(
         &self,
         plan: &QueryPlan<RecordValue>,
@@ -447,6 +573,30 @@ impl Engine {
             Ok(())
         })?;
         Ok(())
+    }
+}
+
+struct AtomicEffect<RecordValue> {
+    kind: DeltaKind,
+    key: crate::RecordKey,
+    record: RecordValue,
+}
+
+impl<RecordValue> AtomicEffect<RecordValue> {
+    fn new(kind: DeltaKind, key: crate::RecordKey, record: RecordValue) -> Self {
+        Self { kind, key, record }
+    }
+
+    fn kind(&self) -> DeltaKind {
+        self.kind
+    }
+
+    fn key(&self) -> &crate::RecordKey {
+        &self.key
+    }
+
+    fn record(&self) -> &RecordValue {
+        &self.record
     }
 }
 

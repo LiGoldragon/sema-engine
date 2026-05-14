@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
-    AggregatePlan, Assertion, Engine, EngineOpen, EngineRecord, FieldSelection, KeyRange, Mutation,
-    QueryPlan, ReadOperator, RecordKey, RecursionMode, Retraction, RuleSetRef, SnapshotId,
-    TableDescriptor, TableName, UnificationPlan,
+    AggregatePlan, Assertion, AtomicBatch, Engine, EngineOpen, EngineRecord, FieldSelection,
+    KeyRange, Mutation, QueryPlan, ReadOperator, RecordKey, RecursionMode, Retraction, RuleSetRef,
+    SnapshotId, TableDescriptor, TableName, UnificationPlan,
 };
 use signal_core::SignalVerb;
 use tempfile::TempDir;
@@ -233,6 +233,127 @@ fn validate_uses_same_typed_plan_errors_as_match() {
             operator: ReadOperator::Project
         }
     ));
+}
+
+#[test]
+fn atomic_commits_write_bundle_under_one_snapshot() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+    engine
+        .assert(Assertion::new(records, ToyRecord::new("alpha", "first")))
+        .expect("first seed succeeds");
+    engine
+        .assert(Assertion::new(records, ToyRecord::new("gamma", "retire")))
+        .expect("second seed succeeds");
+
+    let receipt = engine
+        .atomic(
+            AtomicBatch::new(records)
+                .assert(ToyRecord::new("beta", "new"))
+                .mutate(ToyRecord::new("alpha", "second"))
+                .retract(RecordKey::new("gamma")),
+        )
+        .expect("atomic bundle succeeds");
+    let snapshot = engine
+        .match_records(QueryPlan::all(records))
+        .expect("match succeeds");
+    let log = engine.operation_log().expect("operation log reads");
+
+    assert_eq!(receipt.verb(), SignalVerb::Atomic);
+    assert_eq!(receipt.snapshot(), SnapshotId::new(3));
+    assert_eq!(receipt.operation_count(), 3);
+    assert_eq!(
+        snapshot.records(),
+        &[
+            ToyRecord::new("alpha", "second"),
+            ToyRecord::new("beta", "new")
+        ]
+    );
+    assert_eq!(log.len(), 3);
+    assert_eq!(log[2].verb(), SignalVerb::Atomic);
+    assert_eq!(log[2].snapshot(), SnapshotId::new(3));
+    assert!(log[2].key().is_none());
+}
+
+#[test]
+fn atomic_missing_record_rolls_back_entire_bundle() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+
+    let error = engine
+        .atomic(
+            AtomicBatch::new(records)
+                .assert(ToyRecord::new("beta", "should not persist"))
+                .mutate(ToyRecord::new("missing", "body")),
+        )
+        .expect_err("missing mutation rejects the whole bundle");
+    let snapshot = engine
+        .match_records(QueryPlan::all(records))
+        .expect("match succeeds after failed atomic");
+
+    assert!(matches!(error, sema_engine::Error::RecordNotFound { .. }));
+    assert!(snapshot.records().is_empty());
+    assert!(
+        engine
+            .operation_log()
+            .expect("operation log reads")
+            .is_empty()
+    );
+    assert_eq!(engine.latest_snapshot().unwrap(), SnapshotId::genesis());
+}
+
+#[test]
+fn atomic_empty_batch_returns_typed_error() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+
+    let error = engine
+        .atomic(AtomicBatch::<ToyRecord>::new(records))
+        .expect_err("empty atomic batch is rejected");
+
+    assert!(matches!(error, sema_engine::Error::EmptyAtomicBatch { .. }));
+}
+
+#[test]
+fn atomic_duplicate_keys_return_typed_error_before_writing() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+    engine
+        .assert(Assertion::new(records, ToyRecord::new("alpha", "first")))
+        .expect("seed succeeds");
+
+    let error = engine
+        .atomic(
+            AtomicBatch::new(records)
+                .mutate(ToyRecord::new("alpha", "second"))
+                .retract(RecordKey::new("alpha")),
+        )
+        .expect_err("duplicate keys are rejected");
+    let snapshot = engine
+        .match_records(QueryPlan::key(records, RecordKey::new("alpha")))
+        .expect("match succeeds after duplicate-key rejection");
+    let log = engine.operation_log().expect("operation log reads");
+
+    assert!(matches!(
+        error,
+        sema_engine::Error::DuplicateAtomicKey { .. }
+    ));
+    assert_eq!(snapshot.records(), &[ToyRecord::new("alpha", "first")]);
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].verb(), SignalVerb::Assert);
+    assert_eq!(engine.latest_snapshot().unwrap(), SnapshotId::new(1));
 }
 
 #[test]

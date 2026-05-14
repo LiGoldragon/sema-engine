@@ -114,3 +114,92 @@ impl<RecordValue> Retraction<RecordValue> {
         &self.key
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct AtomicBatch<RecordValue> {
+    table: TableReference<RecordValue>,
+    operations: Vec<AtomicOperation<RecordValue>>,
+}
+
+impl<RecordValue> AtomicBatch<RecordValue> {
+    pub fn new(table: TableReference<RecordValue>) -> Self {
+        Self {
+            table,
+            operations: Vec::new(),
+        }
+    }
+
+    pub fn assert(mut self, record: RecordValue) -> Self {
+        self.operations.push(AtomicOperation::Assert(record));
+        self
+    }
+
+    pub fn mutate(mut self, record: RecordValue) -> Self {
+        self.operations.push(AtomicOperation::Mutate(record));
+        self
+    }
+
+    pub fn retract(mut self, key: RecordKey) -> Self {
+        self.operations.push(AtomicOperation::Retract(key));
+        self
+    }
+
+    pub fn table(&self) -> &TableReference<RecordValue> {
+        &self.table
+    }
+
+    pub fn operations(&self) -> &[AtomicOperation<RecordValue>] {
+        &self.operations
+    }
+
+    pub fn operation_count(&self) -> usize {
+        self.operations.len()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum AtomicOperation<RecordValue> {
+    Assert(RecordValue),
+    Mutate(RecordValue),
+    Retract(RecordKey),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtomicReceipt {
+    verb: SignalVerb,
+    table: TableName,
+    snapshot: SnapshotId,
+    operation_count: usize,
+}
+
+impl AtomicReceipt {
+    pub fn new(
+        verb: SignalVerb,
+        table: TableName,
+        snapshot: SnapshotId,
+        operation_count: usize,
+    ) -> Self {
+        Self {
+            verb,
+            table,
+            snapshot,
+            operation_count,
+        }
+    }
+
+    pub fn verb(&self) -> SignalVerb {
+        self.verb
+    }
+
+    pub fn table(&self) -> &TableName {
+        &self.table
+    }
+
+    pub fn snapshot(&self) -> SnapshotId {
+        self.snapshot
+    }
+
+    pub fn operation_count(&self) -> usize {
+        self.operation_count
+    }
+}

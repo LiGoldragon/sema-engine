@@ -14,6 +14,12 @@ pub enum Error {
     #[error("record is not stored: {table}/{key}")]
     RecordNotFound { table: String, key: String },
 
+    #[error("atomic batch is empty: {table}")]
+    EmptyAtomicBatch { table: String },
+
+    #[error("atomic batch contains duplicate key: {table}/{key}")]
+    DuplicateAtomicKey { table: String, key: String },
+
     #[error("subscription registry lock poisoned")]
     SubscriptionRegistryPoisoned,
 

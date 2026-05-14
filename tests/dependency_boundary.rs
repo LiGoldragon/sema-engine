@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use signal_core::SignalVerb;
+
 struct RepositoryFixture {
     root: PathBuf,
 }
@@ -75,4 +77,38 @@ fn signal_core_roots_do_not_own_read_plan_vocabulary() {
         );
     }
     assert!(cargo.contains("signal-core"));
+}
+
+#[test]
+fn signal_verb_spine_is_closed_at_seven_roots_without_structure() {
+    let roots = [
+        SignalVerb::Assert,
+        SignalVerb::Mutate,
+        SignalVerb::Retract,
+        SignalVerb::Match,
+        SignalVerb::Subscribe,
+        SignalVerb::Atomic,
+        SignalVerb::Validate,
+    ];
+
+    assert_eq!(roots.len(), 7);
+    for root in roots {
+        assert!(SevenRootWitness::accepts(root));
+    }
+}
+
+struct SevenRootWitness;
+
+impl SevenRootWitness {
+    fn accepts(verb: SignalVerb) -> bool {
+        match verb {
+            SignalVerb::Assert
+            | SignalVerb::Mutate
+            | SignalVerb::Retract
+            | SignalVerb::Match
+            | SignalVerb::Subscribe
+            | SignalVerb::Atomic
+            | SignalVerb::Validate => true,
+        }
+    }
 }

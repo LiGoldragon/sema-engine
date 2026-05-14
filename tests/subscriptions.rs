@@ -6,9 +6,9 @@ use std::time::Duration;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
-    Assertion, DeltaKind, Engine, EngineOpen, EngineRecord, Mutation, QueryPlan, RecordKey,
-    Retraction, SequenceRange, SinkError, SnapshotId, SubscriptionDeliveryMode, SubscriptionEvent,
-    SubscriptionSink, TableDescriptor, TableName,
+    Assertion, AtomicBatch, DeltaKind, Engine, EngineOpen, EngineRecord, Mutation, QueryPlan,
+    RecordKey, Retraction, SequenceRange, SinkError, SnapshotId, SubscriptionDeliveryMode,
+    SubscriptionEvent, SubscriptionSink, TableDescriptor, TableName,
 };
 use tempfile::TempDir;
 
@@ -307,6 +307,74 @@ fn subscribe_delta_kind_tracks_write_verb() {
         .collect::<Vec<_>>();
 
     assert_eq!(delta_kinds, [DeltaKind::Mutate, DeltaKind::Retract]);
+}
+
+#[test]
+fn subscribe_atomic_bundle_delivers_per_operation_deltas_after_single_snapshot_commit() {
+    let fixture = SubscriptionFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.descriptor())
+        .expect("table registers");
+    engine
+        .assert(Assertion::new(
+            records,
+            SubscribedRecord::new("alpha", "first"),
+        ))
+        .expect("first seed succeeds");
+    engine
+        .assert(Assertion::new(
+            records,
+            SubscribedRecord::new("gamma", "retire"),
+        ))
+        .expect("second seed succeeds");
+    let sink = Arc::new(InlineRecordEventLog::new());
+    engine
+        .subscribe(QueryPlan::all(records), sink.clone())
+        .expect("subscription succeeds");
+
+    let receipt = engine
+        .atomic(
+            AtomicBatch::new(records)
+                .assert(SubscribedRecord::new("beta", "new"))
+                .mutate(SubscribedRecord::new("alpha", "second"))
+                .retract(RecordKey::new("gamma")),
+        )
+        .expect("atomic bundle succeeds");
+
+    let delta_facts = sink
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            SubscriptionEvent::InitialSnapshot(_) => None,
+            SubscriptionEvent::Delta(delta) => {
+                Some((delta.kind(), delta.snapshot(), delta.record().clone()))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(receipt.snapshot(), SnapshotId::new(3));
+    assert_eq!(receipt.operation_count(), 3);
+    assert_eq!(
+        delta_facts,
+        [
+            (
+                DeltaKind::Assert,
+                SnapshotId::new(3),
+                SubscribedRecord::new("beta", "new")
+            ),
+            (
+                DeltaKind::Mutate,
+                SnapshotId::new(3),
+                SubscribedRecord::new("alpha", "second")
+            ),
+            (
+                DeltaKind::Retract,
+                SnapshotId::new(3),
+                SubscribedRecord::new("gamma", "retire")
+            )
+        ]
+    );
 }
 
 #[test]
