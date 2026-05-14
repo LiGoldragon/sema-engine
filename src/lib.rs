@@ -13,6 +13,7 @@ pub mod mutation;
 pub mod query;
 pub mod record;
 pub mod snapshot;
+pub mod subscribe;
 pub mod table;
 
 pub use catalog::{Catalog, TableRegistration};
@@ -23,4 +24,9 @@ pub use mutation::{Assertion, MutationReceipt};
 pub use query::{QueryFilter, QueryPlan, QuerySnapshot};
 pub use record::{EngineRecord, EngineStoredRecord, RecordKey};
 pub use snapshot::SnapshotId;
+pub use subscribe::{
+    DeltaKind, InitialSnapshot, SequenceRange, SinkError, SubscriptionDeliveryFailure,
+    SubscriptionDelta, SubscriptionEvent, SubscriptionHandle, SubscriptionId, SubscriptionReceipt,
+    SubscriptionRegistration, SubscriptionSink,
+};
 pub use table::{TableDescriptor, TableName, TableReference};

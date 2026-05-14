@@ -27,12 +27,19 @@ authorization, domain validation, and their own databases.
 - `Match` reads records through a registered record family.
 - `Assert` writes one operation-log entry in the same committed write
   transaction as the domain record.
+- `operation_log_range` returns bounded replay entries by `SnapshotId`.
 - `MutationReceipt` carries the committed `SnapshotId`.
 - `QuerySnapshot` carries the latest observed `SnapshotId`.
+- `list_tables` exposes registered table descriptors without exposing
+  the mutable catalog.
+- `Subscribe` registers durable subscription metadata and returns an
+  initial snapshot.
+- `Subscribe` emits deltas only after the mutation commit succeeds.
+- Sink delivery is downstream of the commit and cannot roll back the
+  mutation.
 - Component domain validation happens before calling `Engine`.
 - Component actors own ordering, supervision, sockets, and delivery.
-- Snapshot identity and subscriptions land before real component
-  migration.
+- Subscribe lands before component-level live subscription delivery.
 - First real consumer migration is `persona-mind`.
 - Criome migrates after `persona-mind`.
 
@@ -58,7 +65,7 @@ responsibilities.
 
 ## Current Surface
 
-The first package implements the smallest useful pressure test:
+The current package implements the first useful engine surface:
 
 ```rust
 let request = EngineOpen::new(database_path, SchemaVersion::new(1));
@@ -66,6 +73,9 @@ let mut engine = Engine::open(request)?;
 let family = engine.register_table(TableDescriptor::new(TableName::new("thoughts")))?;
 engine.assert(Assertion::new(family.clone(), thought))?;
 let snapshot = engine.match_records(QueryPlan::all(family))?;
+let _tables = engine.list_tables();
+let _log = engine.operation_log_range(SequenceRange::from(snapshot.snapshot()))?;
+let _subscription = engine.subscribe(QueryPlan::all(family), sink)?;
 engine.storage_kernel().write(|transaction| {
     // temporary component-local tables that have not moved to engine verbs yet
     Ok(())
@@ -74,18 +84,28 @@ engine.storage_kernel().write(|transaction| {
 
 This is not the final query language. It proves the layering:
 registered record family, Signal `Assert`, Signal `Match`, typed rkyv
-values, operation-log cursor, and durable storage through `sema`.
+values, operation-log cursor, bounded log replay, table introspection,
+best-effort post-commit subscription delivery, and durable storage
+through `sema`.
 
 ## Package Order
 
-1. Record trait and table registration.
-2. Operation log and snapshot identity. This package is partially
-   implemented: `Assert` records committed mutations and both
-   mutation/query replies carry `SnapshotId`.
-3. `QueryPlan` / `MutationPlan` execution.
-4. `Subscribe` primitive with post-commit delivery.
-5. `Validate` dry-run and table introspection.
-6. `persona-mind` migration.
+1. Record trait and table registration. Landed.
+2. Operation log and snapshot identity. Landed for `Assert`, `Match`,
+   and bounded replay.
+3. `QueryPlan` / `MutationPlan` execution. Started: `All` and `Key`
+   match plans exist; mutation plans, range, index, aggregate, and
+   constrain are still future work.
+4. `Subscribe` primitive with post-commit delivery. First slice landed:
+   durable registration, initial snapshot, post-commit async deltas,
+   and replay cursor witnesses. Durable failure counters and consumer
+   rebind helpers are still future work.
+5. `Validate` dry-run and table introspection. Started:
+   `list_tables()` exists; validate and index introspection are still
+   future work.
+6. `persona-mind` migration. First graph Assert/Match slice landed;
+   live graph subscription delivery waits on the Subscribe consumer
+   integration.
 7. Criome migration.
 
 ## Non-Goals

@@ -10,6 +10,12 @@ pub enum Error {
 
     #[error("table is not registered: {table}")]
     TableNotRegistered { table: String },
+
+    #[error("subscription registry lock poisoned")]
+    SubscriptionRegistryPoisoned,
+
+    #[error("subscription sink failed before registration: {message}")]
+    SubscriptionSink { message: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

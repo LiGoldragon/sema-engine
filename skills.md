@@ -13,6 +13,10 @@ This repository follows the workspace skills in `/home/li/primary/skills/`.
 - Do not introduce `signal-persona-*` dependencies here; component
   contracts compile their domain records into engine plans.
 - Add a constraint test when adding an architectural rule.
+- Subscription delivery is post-commit. Tests must prove a failing or
+  blocking sink does not roll back or freeze the write path.
+- Consumer crates own async routing and durable outbox policy; this
+  library only exposes the engine primitive.
 
 ## Test Commands
 
@@ -20,5 +24,6 @@ This repository follows the workspace skills in `/home/li/primary/skills/`.
 nix run .#test
 nix run .#test-dependency-boundary
 nix run .#test-engine
+nix run .#test-subscriptions
 nix flake check -L
 ```

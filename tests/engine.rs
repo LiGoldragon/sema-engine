@@ -63,6 +63,7 @@ fn engine_executes_assert_and_match_over_registered_record_family() {
     let records = engine
         .register_table(fixture.toy_descriptor())
         .expect("table registers");
+    let tables = engine.list_tables();
     let receipt = engine
         .assert(Assertion::new(
             records,
@@ -73,6 +74,8 @@ fn engine_executes_assert_and_match_over_registered_record_family() {
     assert_eq!(receipt.verb(), SemaVerb::Assert);
     assert_eq!(receipt.table().as_str(), "toy_records");
     assert_eq!(receipt.snapshot(), SnapshotId::new(1));
+    assert_eq!(tables.len(), 1);
+    assert_eq!(tables[0].table_name(), "toy_records");
 
     let snapshot = engine
         .match_records(QueryPlan::all(records))

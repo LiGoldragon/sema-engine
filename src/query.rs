@@ -1,5 +1,7 @@
 use signal_core::SemaVerb;
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+
 use crate::{RecordKey, SnapshotId, TableName, TableReference};
 
 #[derive(Debug, Clone)]
@@ -32,7 +34,8 @@ impl<RecordValue> QueryPlan<RecordValue> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
 pub enum QueryFilter {
     All,
     Key(RecordKey),

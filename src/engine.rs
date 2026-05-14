@@ -8,21 +8,28 @@ use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use sema::{Schema, SchemaVersion};
 
+use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
-    Catalog, EngineStoredRecord, Error, OperationLogEntry, QueryPlan, QuerySnapshot, Result,
-    SnapshotId, TableDescriptor, TableReference, TableRegistration,
+    Catalog, EngineStoredRecord, Error, InitialSnapshot, OperationLogEntry, QueryPlan,
+    QuerySnapshot, Result, SequenceRange, SnapshotId, SubscriptionHandle, SubscriptionId,
+    SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink, TableDescriptor,
+    TableReference, TableRegistration,
 };
 
 const CATALOG: sema::Table<&'static str, TableRegistration> =
     sema::Table::new("__sema_engine_catalog");
 const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
 const LATEST_SNAPSHOT_KEY: &str = "latest_snapshot";
+const NEXT_SUBSCRIPTION_KEY: &str = "next_subscription";
 const OPERATION_LOG: sema::Table<u64, OperationLogEntry> =
     sema::Table::new("__sema_engine_operation_log");
+const SUBSCRIPTIONS: sema::Table<u64, SubscriptionRegistration> =
+    sema::Table::new("__sema_engine_subscriptions");
 
 pub struct Engine {
     storage: sema::Sema,
     catalog: Catalog,
+    subscriptions: SubscriptionRegistry,
 }
 
 impl Engine {
@@ -34,7 +41,11 @@ impl Engine {
             .map(|(_key, registration)| registration)
             .collect();
         let catalog = Catalog::new(registrations);
-        Ok(Self { storage, catalog })
+        Ok(Self {
+            storage,
+            catalog,
+            subscriptions: SubscriptionRegistry::new(),
+        })
     }
 
     pub fn register_table<RecordValue>(
@@ -56,7 +67,7 @@ impl Engine {
         assertion: crate::Assertion<RecordValue>,
     ) -> Result<crate::MutationReceipt>
     where
-        RecordValue: EngineStoredRecord,
+        RecordValue: EngineStoredRecord + Send + Sync + 'static,
         <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
             + for<'validation> CheckBytes<
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
@@ -69,6 +80,7 @@ impl Engine {
         }
 
         let key = assertion.record().record_key();
+        let record = assertion.record().clone();
         let snapshot = self.next_snapshot()?;
         let operation = OperationLogEntry::new(
             snapshot,
@@ -86,6 +98,9 @@ impl Engine {
             COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
             Ok(())
         })?;
+        self.subscriptions
+            .deliver_assert(*assertion.table().name(), &key, snapshot, &record)?;
+
         Ok(crate::MutationReceipt::new(
             signal_core::SemaVerb::Assert,
             *assertion.table().name(),
@@ -155,6 +170,52 @@ impl Engine {
             .collect())
     }
 
+    pub fn operation_log_range(&self, range: SequenceRange) -> Result<Vec<OperationLogEntry>> {
+        Ok(self
+            .operation_log()?
+            .into_iter()
+            .filter(|entry| range.contains(entry.snapshot()))
+            .collect())
+    }
+
+    pub fn subscribe<RecordValue>(
+        &self,
+        plan: QueryPlan<RecordValue>,
+        sink: std::sync::Arc<dyn SubscriptionSink<RecordValue>>,
+    ) -> Result<SubscriptionReceipt<RecordValue>>
+    where
+        RecordValue: EngineStoredRecord + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let snapshot = self.match_records(plan.clone())?;
+        let handle = self.next_subscription_handle(&plan, snapshot.snapshot())?;
+        let initial = InitialSnapshot::new(handle, snapshot);
+        sink.deliver(crate::SubscriptionEvent::InitialSnapshot(initial.clone()))
+            .map_err(|error| Error::SubscriptionSink {
+                message: error.message().to_owned(),
+            })?;
+        self.persist_subscription(handle, plan.filter().clone())?;
+        self.subscriptions
+            .add(ActiveSubscription::new(handle, plan, sink))?;
+        Ok(SubscriptionReceipt::new(handle, initial))
+    }
+
+    pub fn subscription_registrations(&self) -> Result<Vec<SubscriptionRegistration>> {
+        Ok(self
+            .storage
+            .read(|transaction| SUBSCRIPTIONS.iter(transaction))?
+            .into_iter()
+            .map(|(_key, registration)| registration)
+            .collect())
+    }
+
+    pub fn list_tables(&self) -> Vec<TableRegistration> {
+        self.catalog.registrations().to_vec()
+    }
+
     pub fn catalog(&self) -> &Catalog {
         &self.catalog
     }
@@ -169,6 +230,38 @@ impl Engine {
 
     fn next_snapshot(&self) -> Result<SnapshotId> {
         Ok(self.latest_snapshot()?.next())
+    }
+
+    fn next_subscription_handle<RecordValue>(
+        &self,
+        plan: &QueryPlan<RecordValue>,
+        snapshot: SnapshotId,
+    ) -> Result<SubscriptionHandle> {
+        let id = self.storage.read(|transaction| {
+            Ok(COUNTERS
+                .get(transaction, NEXT_SUBSCRIPTION_KEY)?
+                .map(SubscriptionId::new)
+                .unwrap_or_else(SubscriptionId::first))
+        })?;
+        Ok(SubscriptionHandle::new(id, *plan.table().name(), snapshot))
+    }
+
+    fn persist_subscription(
+        &self,
+        handle: SubscriptionHandle,
+        filter: crate::QueryFilter,
+    ) -> Result<()> {
+        let registration = SubscriptionRegistration::new(handle, filter);
+        self.storage.write(|transaction| {
+            SUBSCRIPTIONS.insert(transaction, handle.id().value(), &registration)?;
+            COUNTERS.insert(
+                transaction,
+                NEXT_SUBSCRIPTION_KEY,
+                &handle.id().next().value(),
+            )?;
+            Ok(())
+        })?;
+        Ok(())
     }
 }
 
