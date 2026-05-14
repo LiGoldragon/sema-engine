@@ -37,6 +37,9 @@ authorization, domain validation, and their own databases.
 - `Subscribe` emits deltas only after the mutation commit succeeds.
 - Sink delivery is downstream of the commit and cannot roll back the
   mutation.
+- Subscription sinks choose detached or inline delivery. Detached is the
+  default for blocking sinks; inline exists for actor enqueue sinks that need
+  deterministic post-commit ordering without polling.
 - Component domain validation happens before calling `Engine`.
 - Component actors own ordering, supervision, sockets, and delivery.
 - Subscribe lands before component-level live subscription delivery.
@@ -97,15 +100,15 @@ through `sema`.
    match plans exist; mutation plans, range, index, aggregate, and
    constrain are still future work.
 4. `Subscribe` primitive with post-commit delivery. First slice landed:
-   durable registration, initial snapshot, post-commit async deltas,
-   and replay cursor witnesses. Durable failure counters and consumer
-   rebind helpers are still future work.
+   durable registration, initial snapshot, post-commit deltas with detached
+   and inline sink modes, and replay cursor witnesses. Durable failure
+   counters and consumer rebind helpers are still future work.
 5. `Validate` dry-run and table introspection. Started:
    `list_tables()` exists; validate and index introspection are still
    future work.
-6. `persona-mind` migration. First graph Assert/Match slice landed;
-   live graph subscription delivery waits on the Subscribe consumer
-   integration.
+6. `persona-mind` migration. First graph Assert/Match and Subscribe consumer
+   slices have landed; further graph query/mutation widening still belongs to
+   the consumer migration.
 7. Criome migration.
 
 ## Non-Goals
