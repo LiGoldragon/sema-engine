@@ -6,9 +6,9 @@ use std::time::Duration;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
-    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, SequenceRange, SinkError,
-    SnapshotId, SubscriptionDeliveryMode, SubscriptionEvent, SubscriptionSink, TableDescriptor,
-    TableName,
+    Assertion, DeltaKind, Engine, EngineOpen, EngineRecord, Mutation, QueryPlan, RecordKey,
+    Retraction, SequenceRange, SinkError, SnapshotId, SubscriptionDeliveryMode, SubscriptionEvent,
+    SubscriptionSink, TableDescriptor, TableName,
 };
 use tempfile::TempDir;
 
@@ -267,6 +267,46 @@ fn subscribe_delta_fires_after_commit_is_visible() {
                     && delta.record() == &SubscribedRecord::new("alpha", "visible")
         )
     }));
+}
+
+#[test]
+fn subscribe_delta_kind_tracks_write_verb() {
+    let fixture = SubscriptionFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.descriptor())
+        .expect("table registers");
+    engine
+        .assert(Assertion::new(
+            records,
+            SubscribedRecord::new("alpha", "first"),
+        ))
+        .expect("assert succeeds before subscription");
+    let sink = Arc::new(InlineRecordEventLog::new());
+    engine
+        .subscribe(QueryPlan::all(records), sink.clone())
+        .expect("subscription succeeds");
+
+    engine
+        .mutate(Mutation::new(
+            records,
+            SubscribedRecord::new("alpha", "second"),
+        ))
+        .expect("mutate succeeds");
+    engine
+        .retract(Retraction::new(records, RecordKey::new("alpha")))
+        .expect("retract succeeds");
+
+    let delta_kinds = sink
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            SubscriptionEvent::InitialSnapshot(_) => None,
+            SubscriptionEvent::Delta(delta) => Some(delta.kind()),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(delta_kinds, [DeltaKind::Mutate, DeltaKind::Retract]);
 }
 
 #[test]

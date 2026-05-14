@@ -24,6 +24,9 @@ authorization, domain validation, and their own databases.
   handle to the same redb file.
 - `Engine` registers record families before executing database verbs.
 - `Assert` writes records through a registered record family.
+- `Mutate` replaces existing records through a registered record family.
+- `Retract` removes existing records through a registered record family.
+- `Mutate` and `Retract` reject missing records with typed errors.
 - `Match` reads records through a registered record family.
 - `ReadPlan` owns query-algebra vocabulary for `Match`, `Subscribe`, and
   `Validate` payloads.
@@ -31,7 +34,7 @@ authorization, domain validation, and their own databases.
   read-plan operators, not `signal-core` root verbs.
 - Unsupported read-plan operators return typed `UnsupportedReadPlan` errors
   instead of pretending execution succeeded.
-- `Assert` writes one operation-log entry in the same committed write
+- `Assert`, `Mutate`, and `Retract` write one operation-log entry in the same committed write
   transaction as the domain record.
 - `operation_log_range` returns bounded replay entries by `SnapshotId`.
 - `MutationReceipt` carries the committed `SnapshotId`.
@@ -81,6 +84,8 @@ let request = EngineOpen::new(database_path, SchemaVersion::new(1));
 let mut engine = Engine::open(request)?;
 let family = engine.register_table(TableDescriptor::new(TableName::new("thoughts")))?;
 engine.assert(Assertion::new(family.clone(), thought))?;
+engine.mutate(Mutation::new(family.clone(), updated_thought))?;
+engine.retract(Retraction::new(family.clone(), retired_key))?;
 let snapshot = engine.match_records(QueryPlan::all(family))?;
 let _tables = engine.list_tables();
 let _log = engine.operation_log_range(SequenceRange::from(snapshot.snapshot()))?;
@@ -92,11 +97,11 @@ engine.storage_kernel().write(|transaction| {
 ```
 
 This is not the final query language. It proves the layering:
-registered record family, Signal `Assert`, Signal `Match`, executable
+registered record family, Signal `Assert`, `Mutate`, `Retract`, Signal `Match`, executable
 `ReadPlan` nodes for all/key/range reads, typed query-algebra nodes for
 future constrain/project/aggregate/infer/recurse execution, typed rkyv values,
 operation-log cursor, bounded log replay, table introspection, best-effort
-post-commit subscription delivery, and durable storage through `sema`.
+post-commit subscription delivery for write verbs, and durable storage through `sema`.
 
 ## Package Order
 

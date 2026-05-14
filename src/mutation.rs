@@ -65,3 +65,52 @@ where
         self.record.record_key()
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct Mutation<RecordValue> {
+    table: TableReference<RecordValue>,
+    record: RecordValue,
+}
+
+impl<RecordValue> Mutation<RecordValue> {
+    pub fn new(table: TableReference<RecordValue>, record: RecordValue) -> Self {
+        Self { table, record }
+    }
+
+    pub fn table(&self) -> &TableReference<RecordValue> {
+        &self.table
+    }
+
+    pub fn record(&self) -> &RecordValue {
+        &self.record
+    }
+}
+
+impl<RecordValue> Mutation<RecordValue>
+where
+    RecordValue: EngineRecord,
+{
+    pub fn record_key(&self) -> RecordKey {
+        self.record.record_key()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Retraction<RecordValue> {
+    table: TableReference<RecordValue>,
+    key: RecordKey,
+}
+
+impl<RecordValue> Retraction<RecordValue> {
+    pub fn new(table: TableReference<RecordValue>, key: RecordKey) -> Self {
+        Self { table, key }
+    }
+
+    pub fn table(&self) -> &TableReference<RecordValue> {
+        &self.table
+    }
+
+    pub fn key(&self) -> &RecordKey {
+        &self.key
+    }
+}

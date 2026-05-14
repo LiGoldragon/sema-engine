@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
-    AggregatePlan, Assertion, Engine, EngineOpen, EngineRecord, FieldSelection, KeyRange,
-    QueryPlan, ReadOperator, RecordKey, RecursionMode, RuleSetRef, SnapshotId, TableDescriptor,
-    TableName, UnificationPlan,
+    AggregatePlan, Assertion, Engine, EngineOpen, EngineRecord, FieldSelection, KeyRange, Mutation,
+    QueryPlan, ReadOperator, RecordKey, RecursionMode, Retraction, RuleSetRef, SnapshotId,
+    TableDescriptor, TableName, UnificationPlan,
 };
 use signal_core::SignalVerb;
 use tempfile::TempDir;
@@ -146,6 +146,76 @@ fn engine_executes_key_range_read_plan_over_registered_record_family() {
             ToyRecord::new("alpha", "alpha"),
             ToyRecord::new("beta", "beta")
         ]
+    );
+}
+
+#[test]
+fn engine_executes_mutate_and_retract_over_existing_record_family() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+    engine
+        .assert(Assertion::new(records, ToyRecord::new("alpha", "first")))
+        .expect("assert succeeds");
+
+    let mutation = engine
+        .mutate(Mutation::new(records, ToyRecord::new("alpha", "second")))
+        .expect("mutate succeeds");
+    let updated = engine
+        .match_records(QueryPlan::key(records, RecordKey::new("alpha")))
+        .expect("match after mutate succeeds");
+
+    assert_eq!(mutation.verb(), SignalVerb::Mutate);
+    assert_eq!(mutation.snapshot(), SnapshotId::new(2));
+    assert_eq!(updated.records(), &[ToyRecord::new("alpha", "second")]);
+
+    let retraction = engine
+        .retract(Retraction::new(records, RecordKey::new("alpha")))
+        .expect("retract succeeds");
+    let removed = engine
+        .match_records(QueryPlan::key(records, RecordKey::new("alpha")))
+        .expect("match after retract succeeds");
+    let log = engine.operation_log().expect("operation log reads");
+
+    assert_eq!(retraction.verb(), SignalVerb::Retract);
+    assert_eq!(retraction.snapshot(), SnapshotId::new(3));
+    assert!(removed.records().is_empty());
+    assert_eq!(log.len(), 3);
+    assert_eq!(log[0].verb(), SignalVerb::Assert);
+    assert_eq!(log[1].verb(), SignalVerb::Mutate);
+    assert_eq!(log[2].verb(), SignalVerb::Retract);
+}
+
+#[test]
+fn mutate_and_retract_missing_records_return_typed_errors() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+
+    let mutation_error = engine
+        .mutate(Mutation::new(records, ToyRecord::new("missing", "body")))
+        .expect_err("mutating a missing record is rejected");
+    let retraction_error = engine
+        .retract(Retraction::new(records, RecordKey::new("missing")))
+        .expect_err("retracting a missing record is rejected");
+
+    assert!(matches!(
+        mutation_error,
+        sema_engine::Error::RecordNotFound { .. }
+    ));
+    assert!(matches!(
+        retraction_error,
+        sema_engine::Error::RecordNotFound { .. }
+    ));
+    assert!(
+        engine
+            .operation_log()
+            .expect("operation log reads")
+            .is_empty()
     );
 }
 

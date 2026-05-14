@@ -11,6 +11,9 @@ pub enum Error {
     #[error("table is not registered: {table}")]
     TableNotRegistered { table: String },
 
+    #[error("record is not stored: {table}/{key}")]
+    RecordNotFound { table: String, key: String },
+
     #[error("subscription registry lock poisoned")]
     SubscriptionRegistryPoisoned,
 

@@ -10,10 +10,10 @@ use sema::{Schema, SchemaVersion};
 
 use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
-    Catalog, EngineStoredRecord, Error, InitialSnapshot, OperationLogEntry, QueryPlan,
-    QuerySnapshot, Result, SequenceRange, SnapshotId, SubscriptionHandle, SubscriptionId,
-    SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink, TableDescriptor,
-    TableReference, TableRegistration,
+    Catalog, DeltaKind, EngineStoredRecord, Error, InitialSnapshot, OperationLogEntry, QueryPlan,
+    QuerySnapshot, Result, Retraction, SequenceRange, SnapshotId, SubscriptionHandle,
+    SubscriptionId, SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink,
+    TableDescriptor, TableReference, TableRegistration,
 };
 
 const CATALOG: sema::Table<&'static str, TableRegistration> =
@@ -73,11 +73,7 @@ impl Engine {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
-        if !self.catalog.is_registered(assertion.table().name()) {
-            return Err(Error::TableNotRegistered {
-                table: assertion.table().name().as_str().to_owned(),
-            });
-        }
+        self.ensure_registered(assertion.table())?;
 
         let key = assertion.record().record_key();
         let record = assertion.record().clone();
@@ -98,12 +94,139 @@ impl Engine {
             COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
             Ok(())
         })?;
-        self.subscriptions
-            .deliver_assert(*assertion.table().name(), &key, snapshot, &record)?;
+        self.subscriptions.deliver_delta(
+            DeltaKind::Assert,
+            *assertion.table().name(),
+            &key,
+            snapshot,
+            &record,
+        )?;
 
         Ok(crate::MutationReceipt::new(
             signal_core::SignalVerb::Assert,
             *assertion.table().name(),
+            key,
+            snapshot,
+        ))
+    }
+
+    pub fn mutate<RecordValue>(
+        &self,
+        mutation: crate::Mutation<RecordValue>,
+    ) -> Result<crate::MutationReceipt>
+    where
+        RecordValue: EngineStoredRecord + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        self.ensure_registered(mutation.table())?;
+
+        let key = mutation.record().record_key();
+        if self
+            .storage
+            .read(|transaction| {
+                mutation
+                    .table()
+                    .sema_table()
+                    .get(transaction, key.to_owned_string())
+            })?
+            .is_none()
+        {
+            return Err(self.record_not_found(mutation.table(), &key));
+        }
+
+        let record = mutation.record().clone();
+        let snapshot = self.next_snapshot()?;
+        let operation = OperationLogEntry::new(
+            snapshot,
+            signal_core::SignalVerb::Mutate,
+            *mutation.table().name(),
+            Some(key.clone()),
+        );
+        self.storage.write(|transaction| {
+            mutation.table().sema_table().insert(
+                transaction,
+                key.to_owned_string(),
+                mutation.record(),
+            )?;
+            OPERATION_LOG.insert(transaction, snapshot.value(), &operation)?;
+            COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
+            Ok(())
+        })?;
+        self.subscriptions.deliver_delta(
+            DeltaKind::Mutate,
+            *mutation.table().name(),
+            &key,
+            snapshot,
+            &record,
+        )?;
+
+        Ok(crate::MutationReceipt::new(
+            signal_core::SignalVerb::Mutate,
+            *mutation.table().name(),
+            key,
+            snapshot,
+        ))
+    }
+
+    pub fn retract<RecordValue>(
+        &self,
+        retraction: Retraction<RecordValue>,
+    ) -> Result<crate::MutationReceipt>
+    where
+        RecordValue: EngineStoredRecord + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        self.ensure_registered(retraction.table())?;
+
+        let Some(record) = self.storage.read(|transaction| {
+            retraction
+                .table()
+                .sema_table()
+                .get(transaction, retraction.key().to_owned_string())
+        })?
+        else {
+            return Err(self.record_not_found(retraction.table(), retraction.key()));
+        };
+
+        let key = retraction.key().clone();
+        let snapshot = self.next_snapshot()?;
+        let operation = OperationLogEntry::new(
+            snapshot,
+            signal_core::SignalVerb::Retract,
+            *retraction.table().name(),
+            Some(key.clone()),
+        );
+        let removed = self.storage.write(|transaction| {
+            let removed = retraction
+                .table()
+                .sema_table()
+                .remove(transaction, key.to_owned_string())?;
+            if removed {
+                OPERATION_LOG.insert(transaction, snapshot.value(), &operation)?;
+                COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
+            }
+            Ok(removed)
+        })?;
+        if !removed {
+            return Err(self.record_not_found(retraction.table(), &key));
+        }
+        self.subscriptions.deliver_delta(
+            DeltaKind::Retract,
+            *retraction.table().name(),
+            &key,
+            snapshot,
+            &record,
+        )?;
+
+        Ok(crate::MutationReceipt::new(
+            signal_core::SignalVerb::Retract,
+            *retraction.table().name(),
             key,
             snapshot,
         ))
@@ -120,11 +243,7 @@ impl Engine {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
-        if !self.catalog.is_registered(query.table().name()) {
-            return Err(Error::TableNotRegistered {
-                table: query.table().name().as_str().to_owned(),
-            });
-        }
+        self.ensure_registered(query.table())?;
 
         let snapshot = self.latest_snapshot()?;
         let records = match query.read_plan().node() {
@@ -254,6 +373,27 @@ impl Engine {
 
     fn next_snapshot(&self) -> Result<SnapshotId> {
         Ok(self.latest_snapshot()?.next())
+    }
+
+    fn ensure_registered<RecordValue>(&self, table: &TableReference<RecordValue>) -> Result<()> {
+        if self.catalog.is_registered(table.name()) {
+            Ok(())
+        } else {
+            Err(Error::TableNotRegistered {
+                table: table.name().as_str().to_owned(),
+            })
+        }
+    }
+
+    fn record_not_found<RecordValue>(
+        &self,
+        table: &TableReference<RecordValue>,
+        key: &crate::RecordKey,
+    ) -> Error {
+        Error::RecordNotFound {
+            table: table.name().as_str().to_owned(),
+            key: key.to_owned_string(),
+        }
     }
 
     fn next_subscription_handle<RecordValue>(

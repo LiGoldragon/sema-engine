@@ -211,12 +211,16 @@ impl<RecordValue> SubscriptionDelta<RecordValue> {
 #[rkyv(derive(Debug))]
 pub enum DeltaKind {
     Assert,
+    Mutate,
+    Retract,
 }
 
 impl DeltaKind {
     pub fn verb(&self) -> SignalVerb {
         match self {
             Self::Assert => SignalVerb::Assert,
+            Self::Mutate => SignalVerb::Mutate,
+            Self::Retract => SignalVerb::Retract,
         }
     }
 }
@@ -323,8 +327,9 @@ impl SubscriptionRegistry {
         Ok(())
     }
 
-    pub(crate) fn deliver_assert<RecordValue>(
+    pub(crate) fn deliver_delta<RecordValue>(
         &self,
+        kind: DeltaKind,
         table: TableName,
         key: &RecordKey,
         snapshot: SnapshotId,
@@ -340,7 +345,7 @@ impl SubscriptionRegistry {
             .clone();
         let record = record as &dyn Any;
         for entry in entries {
-            entry.deliver_assert(table, key, snapshot, record);
+            entry.deliver_delta(kind, table, key, snapshot, record);
         }
         Ok(())
     }
@@ -367,8 +372,9 @@ impl<RecordValue> ActiveSubscription<RecordValue> {
 }
 
 trait ErasedSubscription: Send + Sync {
-    fn deliver_assert(
+    fn deliver_delta(
         &self,
+        kind: DeltaKind,
         table: TableName,
         key: &RecordKey,
         snapshot: SnapshotId,
@@ -380,8 +386,9 @@ impl<RecordValue> ErasedSubscription for ActiveSubscription<RecordValue>
 where
     RecordValue: Clone + Send + Sync + 'static,
 {
-    fn deliver_assert(
+    fn deliver_delta(
         &self,
+        kind: DeltaKind,
         table: TableName,
         key: &RecordKey,
         snapshot: SnapshotId,
@@ -397,7 +404,7 @@ where
 
         let delta = SubscriptionDelta::new(
             self.handle,
-            DeltaKind::Assert,
+            kind,
             table,
             key.clone(),
             snapshot,
