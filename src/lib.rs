@@ -24,6 +24,7 @@ pub use mutation::{Assertion, Mutation, MutationReceipt, Retraction};
 pub use query::{
     AggregatePlan, FieldSelection, KeyRange, PredicatePlan, QueryFilter, QueryPlan, QuerySnapshot,
     ReadOperator, ReadPlan, ReadPlanNode, RecursionMode, RuleSetRef, UnificationPlan,
+    ValidationReceipt,
 };
 pub use record::{EngineRecord, EngineStoredRecord, RecordKey};
 pub use snapshot::SnapshotId;

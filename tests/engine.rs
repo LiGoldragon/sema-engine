@@ -189,6 +189,53 @@ fn engine_executes_mutate_and_retract_over_existing_record_family() {
 }
 
 #[test]
+fn validate_dry_run_returns_validate_receipt_without_operation_log_write() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+    engine
+        .assert(Assertion::new(records, ToyRecord::new("alpha", "first")))
+        .expect("assert succeeds");
+    let log_before = engine.operation_log().expect("operation log reads");
+
+    let receipt = engine
+        .validate(QueryPlan::key(records, RecordKey::new("alpha")))
+        .expect("validate succeeds");
+    let log_after = engine.operation_log().expect("operation log reads again");
+
+    assert_eq!(receipt.verb(), SignalVerb::Validate);
+    assert_eq!(receipt.table().as_str(), "toy_records");
+    assert_eq!(receipt.snapshot(), SnapshotId::new(1));
+    assert_eq!(receipt.record_count(), 1);
+    assert_eq!(log_after, log_before);
+}
+
+#[test]
+fn validate_uses_same_typed_plan_errors_as_match() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+
+    let error = engine
+        .validate(QueryPlan::<ToyRecord>::project(
+            records,
+            FieldSelection::named(["body"]),
+        ))
+        .expect_err("validate rejects unsupported plan");
+
+    assert!(matches!(
+        error,
+        sema_engine::Error::UnsupportedReadPlan {
+            operator: ReadOperator::Project
+        }
+    ));
+}
+
+#[test]
 fn mutate_and_retract_missing_records_return_typed_errors() {
     let fixture = EngineFixture::new();
     let mut engine = fixture.open_engine();

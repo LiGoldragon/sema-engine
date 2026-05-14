@@ -420,3 +420,43 @@ impl<RecordValue> QuerySnapshot<RecordValue> {
         &self.records
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationReceipt {
+    verb: SignalVerb,
+    table: TableName,
+    snapshot: SnapshotId,
+    record_count: usize,
+}
+
+impl ValidationReceipt {
+    pub fn new(
+        verb: SignalVerb,
+        table: TableName,
+        snapshot: SnapshotId,
+        record_count: usize,
+    ) -> Self {
+        Self {
+            verb,
+            table,
+            snapshot,
+            record_count,
+        }
+    }
+
+    pub fn verb(&self) -> SignalVerb {
+        self.verb
+    }
+
+    pub fn table(&self) -> &TableName {
+        &self.table
+    }
+
+    pub fn snapshot(&self) -> SnapshotId {
+        self.snapshot
+    }
+
+    pub fn record_count(&self) -> usize {
+        self.record_count
+    }
+}

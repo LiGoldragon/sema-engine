@@ -294,6 +294,27 @@ impl Engine {
         ))
     }
 
+    pub fn validate<RecordValue>(
+        &self,
+        query: QueryPlan<RecordValue>,
+    ) -> Result<crate::ValidationReceipt>
+    where
+        RecordValue: EngineStoredRecord,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let table = *query.table().name();
+        let snapshot = self.match_records(query)?;
+        Ok(crate::ValidationReceipt::new(
+            signal_core::SignalVerb::Validate,
+            table,
+            snapshot.snapshot(),
+            snapshot.records().len(),
+        ))
+    }
+
     pub fn latest_snapshot(&self) -> Result<SnapshotId> {
         let value = self.storage.read(|transaction| {
             Ok(COUNTERS

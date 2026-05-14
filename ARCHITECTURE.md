@@ -28,6 +28,8 @@ authorization, domain validation, and their own databases.
 - `Retract` removes existing records through a registered record family.
 - `Mutate` and `Retract` reject missing records with typed errors.
 - `Match` reads records through a registered record family.
+- `Validate` dry-runs executable read plans through a registered record
+  family without mutating storage.
 - `ReadPlan` owns query-algebra vocabulary for `Match`, `Subscribe`, and
   `Validate` payloads.
 - `Constrain`, `Project`, `Aggregate`, `Infer`, and `Recurse` are sema-engine
@@ -39,6 +41,8 @@ authorization, domain validation, and their own databases.
 - `operation_log_range` returns bounded replay entries by `SnapshotId`.
 - `MutationReceipt` carries the committed `SnapshotId`.
 - `QuerySnapshot` carries the latest observed `SnapshotId`.
+- `ValidationReceipt` carries the observed `SnapshotId` and record count.
+- `Validate` does not write operation-log entries.
 - `list_tables` exposes registered table descriptors without exposing
   the mutable catalog.
 - `Subscribe` registers durable subscription metadata and returns an
@@ -87,6 +91,7 @@ engine.assert(Assertion::new(family.clone(), thought))?;
 engine.mutate(Mutation::new(family.clone(), updated_thought))?;
 engine.retract(Retraction::new(family.clone(), retired_key))?;
 let snapshot = engine.match_records(QueryPlan::all(family))?;
+let validation = engine.validate(QueryPlan::all(family))?;
 let _tables = engine.list_tables();
 let _log = engine.operation_log_range(SequenceRange::from(snapshot.snapshot()))?;
 let _subscription = engine.subscribe(QueryPlan::all(family), sink)?;
@@ -97,11 +102,12 @@ engine.storage_kernel().write(|transaction| {
 ```
 
 This is not the final query language. It proves the layering:
-registered record family, Signal `Assert`, `Mutate`, `Retract`, Signal `Match`, executable
-`ReadPlan` nodes for all/key/range reads, typed query-algebra nodes for
-future constrain/project/aggregate/infer/recurse execution, typed rkyv values,
-operation-log cursor, bounded log replay, table introspection, best-effort
-post-commit subscription delivery for write verbs, and durable storage through `sema`.
+registered record family, Signal `Assert`, `Mutate`, `Retract`, Signal `Match`,
+Signal `Validate`, executable `ReadPlan` nodes for all/key/range reads, typed
+query-algebra nodes for future constrain/project/aggregate/infer/recurse
+execution, typed rkyv values, operation-log cursor, bounded log replay, table
+introspection, best-effort post-commit subscription delivery for write verbs,
+and durable storage through `sema`.
 
 ## Package Order
 
@@ -118,7 +124,7 @@ post-commit subscription delivery for write verbs, and durable storage through `
    and inline sink modes, and replay cursor witnesses. Durable failure
    counters and consumer rebind helpers are still future work.
 5. `Validate` dry-run and table introspection. Started:
-   `list_tables()` exists; validate and index introspection are still
+   `list_tables()` and `Engine::validate` exist; index introspection is still
    future work.
 6. `persona-mind` migration. First graph Assert/Match and Subscribe consumer
    slices have landed; further graph query/mutation widening still belongs to
