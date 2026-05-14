@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
-    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, TableDescriptor, TableName,
+    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, SnapshotId, TableDescriptor,
+    TableName,
 };
 use signal_core::SemaVerb;
 use tempfile::TempDir;
@@ -71,12 +72,14 @@ fn engine_executes_assert_and_match_over_registered_record_family() {
 
     assert_eq!(receipt.verb(), SemaVerb::Assert);
     assert_eq!(receipt.table().as_str(), "toy_records");
+    assert_eq!(receipt.snapshot(), SnapshotId::new(1));
 
     let snapshot = engine
         .match_records(QueryPlan::all(records))
         .expect("match succeeds");
 
     assert_eq!(snapshot.verb(), SemaVerb::Match);
+    assert_eq!(snapshot.snapshot(), SnapshotId::new(1));
     assert_eq!(
         snapshot.records(),
         &[ToyRecord::new("first", "stored through engine")]

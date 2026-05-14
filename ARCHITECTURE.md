@@ -22,6 +22,10 @@ authorization, domain validation, and their own databases.
 - `Engine` registers record families before executing database verbs.
 - `Assert` writes records through a registered record family.
 - `Match` reads records through a registered record family.
+- `Assert` writes one operation-log entry in the same committed write
+  transaction as the domain record.
+- `MutationReceipt` carries the committed `SnapshotId`.
+- `QuerySnapshot` carries the latest observed `SnapshotId`.
 - Component domain validation happens before calling `Engine`.
 - Component actors own ordering, supervision, sockets, and delivery.
 - Snapshot identity and subscriptions land before real component
@@ -63,12 +67,14 @@ let snapshot = engine.match_records(QueryPlan::all(family))?;
 
 This is not the final query language. It proves the layering:
 registered record family, Signal `Assert`, Signal `Match`, typed rkyv
-values, and durable storage through `sema`.
+values, operation-log cursor, and durable storage through `sema`.
 
 ## Package Order
 
 1. Record trait and table registration.
-2. Operation log and snapshot identity.
+2. Operation log and snapshot identity. This package is partially
+   implemented: `Assert` records committed mutations and both
+   mutation/query replies carry `SnapshotId`.
 3. `QueryPlan` / `MutationPlan` execution.
 4. `Subscribe` primitive with post-commit delivery.
 5. `Validate` dry-run and table introspection.

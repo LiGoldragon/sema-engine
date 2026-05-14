@@ -9,12 +9,16 @@ use rkyv::validation::shared::SharedValidator;
 use sema::{Schema, SchemaVersion};
 
 use crate::{
-    Catalog, EngineStoredRecord, Error, QueryPlan, QuerySnapshot, Result, TableDescriptor,
-    TableReference, TableRegistration,
+    Catalog, EngineStoredRecord, Error, OperationLogEntry, QueryPlan, QuerySnapshot, Result,
+    SnapshotId, TableDescriptor, TableReference, TableRegistration,
 };
 
 const CATALOG: sema::Table<&'static str, TableRegistration> =
     sema::Table::new("__sema_engine_catalog");
+const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
+const LATEST_SNAPSHOT_KEY: &str = "latest_snapshot";
+const OPERATION_LOG: sema::Table<u64, OperationLogEntry> =
+    sema::Table::new("__sema_engine_operation_log");
 
 pub struct Engine {
     storage: sema::Sema,
@@ -65,17 +69,28 @@ impl Engine {
         }
 
         let key = assertion.record().record_key();
+        let snapshot = self.next_snapshot()?;
+        let operation = OperationLogEntry::new(
+            snapshot,
+            signal_core::SemaVerb::Assert,
+            *assertion.table().name(),
+            Some(key.clone()),
+        );
         self.storage.write(|transaction| {
             assertion.table().sema_table().insert(
                 transaction,
                 key.to_owned_string(),
                 assertion.record(),
-            )
+            )?;
+            OPERATION_LOG.insert(transaction, snapshot.value(), &operation)?;
+            COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
+            Ok(())
         })?;
         Ok(crate::MutationReceipt::new(
             signal_core::SemaVerb::Assert,
             *assertion.table().name(),
             key,
+            snapshot,
         ))
     }
 
@@ -96,6 +111,7 @@ impl Engine {
             });
         }
 
+        let snapshot = self.latest_snapshot()?;
         let records = self.storage.read(|transaction| match query.filter() {
             crate::QueryFilter::All => Ok(query
                 .table()
@@ -115,8 +131,28 @@ impl Engine {
         Ok(QuerySnapshot::new(
             signal_core::SemaVerb::Match,
             *query.table().name(),
+            snapshot,
             records,
         ))
+    }
+
+    pub fn latest_snapshot(&self) -> Result<SnapshotId> {
+        let value = self.storage.read(|transaction| {
+            Ok(COUNTERS
+                .get(transaction, LATEST_SNAPSHOT_KEY)?
+                .map(SnapshotId::new)
+                .unwrap_or_else(SnapshotId::genesis))
+        })?;
+        Ok(value)
+    }
+
+    pub fn operation_log(&self) -> Result<Vec<OperationLogEntry>> {
+        Ok(self
+            .storage
+            .read(|transaction| OPERATION_LOG.iter(transaction))?
+            .into_iter()
+            .map(|(_sequence, entry)| entry)
+            .collect())
     }
 
     pub fn catalog(&self) -> &Catalog {
@@ -125,6 +161,10 @@ impl Engine {
 
     pub fn storage_path(&self) -> &Path {
         self.storage.path()
+    }
+
+    fn next_snapshot(&self) -> Result<SnapshotId> {
+        Ok(self.latest_snapshot()?.next())
     }
 }
 

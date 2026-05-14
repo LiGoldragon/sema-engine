@@ -8,15 +8,19 @@
 pub mod catalog;
 pub mod engine;
 pub mod error;
+pub mod log;
 pub mod mutation;
 pub mod query;
 pub mod record;
+pub mod snapshot;
 pub mod table;
 
 pub use catalog::{Catalog, TableRegistration};
 pub use engine::{Engine, EngineOpen};
 pub use error::{Error, Result};
+pub use log::OperationLogEntry;
 pub use mutation::{Assertion, MutationReceipt};
 pub use query::{QueryFilter, QueryPlan, QuerySnapshot};
 pub use record::{EngineRecord, EngineStoredRecord, RecordKey};
+pub use snapshot::SnapshotId;
 pub use table::{TableDescriptor, TableName, TableReference};

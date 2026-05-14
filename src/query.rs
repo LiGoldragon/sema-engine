@@ -1,6 +1,6 @@
 use signal_core::SemaVerb;
 
-use crate::{RecordKey, TableName, TableReference};
+use crate::{RecordKey, SnapshotId, TableName, TableReference};
 
 #[derive(Debug, Clone)]
 pub struct QueryPlan<RecordValue> {
@@ -42,14 +42,21 @@ pub enum QueryFilter {
 pub struct QuerySnapshot<RecordValue> {
     verb: SemaVerb,
     table: TableName,
+    snapshot: SnapshotId,
     records: Vec<RecordValue>,
 }
 
 impl<RecordValue> QuerySnapshot<RecordValue> {
-    pub fn new(verb: SemaVerb, table: TableName, records: Vec<RecordValue>) -> Self {
+    pub fn new(
+        verb: SemaVerb,
+        table: TableName,
+        snapshot: SnapshotId,
+        records: Vec<RecordValue>,
+    ) -> Self {
         Self {
             verb,
             table,
+            snapshot,
             records,
         }
     }
@@ -60,6 +67,10 @@ impl<RecordValue> QuerySnapshot<RecordValue> {
 
     pub fn table(&self) -> &TableName {
         &self.table
+    }
+
+    pub fn snapshot(&self) -> SnapshotId {
+        self.snapshot
     }
 
     pub fn records(&self) -> &[RecordValue] {

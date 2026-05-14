@@ -38,6 +38,7 @@
         testScript = scriptApplication "test" ./scripts/test;
         testDependencyBoundaryScript = scriptApplication "test-dependency-boundary" ./scripts/test-dependency-boundary;
         testEngineScript = scriptApplication "test-engine" ./scripts/test-engine;
+        testOperationLogScript = scriptApplication "test-operation-log" ./scripts/test-operation-log;
       in
       {
         packages = {
@@ -48,6 +49,7 @@
           test = testScript;
           test-dependency-boundary = testDependencyBoundaryScript;
           test-engine = testEngineScript;
+          test-operation-log = testOperationLogScript;
         };
 
         apps = {
@@ -74,6 +76,12 @@
             program = "${testEngineScript}/bin/sema-engine-test-engine";
             meta.description = "Run sema-engine's registered-record execution witnesses";
           };
+
+          test-operation-log = {
+            type = "app";
+            program = "${testOperationLogScript}/bin/sema-engine-test-operation-log";
+            meta.description = "Run sema-engine's operation-log and snapshot cursor witnesses";
+          };
         };
 
         checks = {
@@ -93,6 +101,11 @@
           test-engine = craneLib.cargoTest (commonArgs // {
             inherit cargoArtifacts;
             cargoTestExtraArgs = "--test engine";
+          });
+
+          test-operation-log = craneLib.cargoTest (commonArgs // {
+            inherit cargoArtifacts;
+            cargoTestExtraArgs = "--test operation_log";
           });
 
           doc = craneLib.cargoDoc (commonArgs // {

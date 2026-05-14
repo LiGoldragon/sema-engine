@@ -1,0 +1,110 @@
+use std::path::PathBuf;
+
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use sema::SchemaVersion;
+use sema_engine::{
+    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, SnapshotId, TableDescriptor,
+    TableName,
+};
+use signal_core::SemaVerb;
+use tempfile::TempDir;
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+struct LoggedRecord {
+    key: String,
+    body: String,
+}
+
+impl LoggedRecord {
+    fn new(key: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            body: body.into(),
+        }
+    }
+}
+
+impl EngineRecord for LoggedRecord {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.key.clone())
+    }
+}
+
+struct LogFixture {
+    directory: TempDir,
+}
+
+impl LogFixture {
+    fn new() -> Self {
+        Self {
+            directory: tempfile::tempdir().expect("temp dir is created"),
+        }
+    }
+
+    fn database_path(&self) -> PathBuf {
+        self.directory.path().join("engine.redb")
+    }
+
+    fn open_engine(&self) -> Engine {
+        Engine::open(EngineOpen::new(self.database_path(), SchemaVersion::new(1)))
+            .expect("engine opens")
+    }
+
+    fn descriptor(&self) -> TableDescriptor<LoggedRecord> {
+        TableDescriptor::new(TableName::new("logged_records"))
+    }
+}
+
+#[test]
+fn assert_writes_operation_log_entry_with_committed_snapshot() {
+    let fixture = LogFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.descriptor())
+        .expect("table registers");
+    let receipt = engine
+        .assert(Assertion::new(records, LoggedRecord::new("alpha", "first")))
+        .expect("assert succeeds");
+
+    assert_eq!(receipt.snapshot(), SnapshotId::new(1));
+    let log = engine.operation_log().expect("operation log reads");
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].snapshot(), SnapshotId::new(1));
+    assert_eq!(log[0].verb(), SemaVerb::Assert);
+    assert_eq!(log[0].table_name(), "logged_records");
+    assert_eq!(log[0].key().map(RecordKey::as_str), Some("alpha"));
+}
+
+#[test]
+fn operation_log_and_snapshot_cursor_survive_reopen() {
+    let fixture = LogFixture::new();
+    {
+        let mut engine = fixture.open_engine();
+        let records = engine
+            .register_table(fixture.descriptor())
+            .expect("table registers");
+        engine
+            .assert(Assertion::new(records, LoggedRecord::new("alpha", "first")))
+            .expect("first assert succeeds");
+        engine
+            .assert(Assertion::new(records, LoggedRecord::new("beta", "second")))
+            .expect("second assert succeeds");
+    }
+
+    let mut reopened = fixture.open_engine();
+    let records = reopened
+        .register_table(fixture.descriptor())
+        .expect("table reference is reconstructed");
+    let snapshot = reopened
+        .match_records(QueryPlan::all(records))
+        .expect("match succeeds");
+    let log = reopened.operation_log().expect("operation log reads");
+
+    assert_eq!(snapshot.snapshot(), SnapshotId::new(2));
+    assert_eq!(snapshot.records().len(), 2);
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0].snapshot(), SnapshotId::new(1));
+    assert_eq!(log[1].snapshot(), SnapshotId::new(2));
+    assert_eq!(reopened.latest_snapshot().unwrap(), SnapshotId::new(2));
+}
