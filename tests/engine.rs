@@ -3,10 +3,11 @@ use std::path::PathBuf;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
-    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, SnapshotId, TableDescriptor,
-    TableName,
+    AggregatePlan, Assertion, Engine, EngineOpen, EngineRecord, FieldSelection, KeyRange,
+    QueryPlan, ReadOperator, RecordKey, RecursionMode, RuleSetRef, SnapshotId, TableDescriptor,
+    TableName, UnificationPlan,
 };
-use signal_core::SemaVerb;
+use signal_core::SignalVerb;
 use tempfile::TempDir;
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -71,7 +72,7 @@ fn engine_executes_assert_and_match_over_registered_record_family() {
         ))
         .expect("assert succeeds");
 
-    assert_eq!(receipt.verb(), SemaVerb::Assert);
+    assert_eq!(receipt.verb(), SignalVerb::Assert);
     assert_eq!(receipt.table().as_str(), "toy_records");
     assert_eq!(receipt.snapshot(), SnapshotId::new(1));
     assert_eq!(tables.len(), 1);
@@ -81,7 +82,7 @@ fn engine_executes_assert_and_match_over_registered_record_family() {
         .match_records(QueryPlan::all(records))
         .expect("match succeeds");
 
-    assert_eq!(snapshot.verb(), SemaVerb::Match);
+    assert_eq!(snapshot.verb(), SignalVerb::Match);
     assert_eq!(snapshot.snapshot(), SnapshotId::new(1));
     assert_eq!(
         snapshot.records(),
@@ -117,6 +118,94 @@ fn engine_reopens_registered_catalog_and_matches_existing_records() {
         snapshot.records(),
         &[ToyRecord::new("persisted", "catalog")]
     );
+}
+
+#[test]
+fn engine_executes_key_range_read_plan_over_registered_record_family() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+    for key in ["alpha", "beta", "gamma"] {
+        engine
+            .assert(Assertion::new(records, ToyRecord::new(key, key)))
+            .expect("assert succeeds");
+    }
+
+    let snapshot = engine
+        .match_records(QueryPlan::key_range(
+            records,
+            KeyRange::between(RecordKey::new("alpha"), RecordKey::new("beta")),
+        ))
+        .expect("range match succeeds");
+
+    assert_eq!(
+        snapshot.records(),
+        &[
+            ToyRecord::new("alpha", "alpha"),
+            ToyRecord::new("beta", "beta")
+        ]
+    );
+}
+
+#[test]
+fn sema_engine_owns_demoted_read_plan_operator_vocabulary() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+
+    let plans = [
+        (
+            QueryPlan::<ToyRecord>::constrain(records, UnificationPlan::new(["name"])),
+            ReadOperator::Constrain,
+        ),
+        (
+            QueryPlan::<ToyRecord>::project(records, FieldSelection::named(["key", "body"])),
+            ReadOperator::Project,
+        ),
+        (
+            QueryPlan::<ToyRecord>::aggregate(records, AggregatePlan::new("count")),
+            ReadOperator::Aggregate,
+        ),
+        (
+            QueryPlan::<ToyRecord>::infer(records, RuleSetRef::new("taxonomy")),
+            ReadOperator::Infer,
+        ),
+        (
+            QueryPlan::<ToyRecord>::recurse(records, RecursionMode::new("depends-on")),
+            ReadOperator::Recurse,
+        ),
+    ];
+
+    for (plan, operator) in plans {
+        assert_eq!(plan.read_plan().operator(), operator);
+    }
+}
+
+#[test]
+fn unsupported_read_plan_operator_returns_typed_error() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+
+    let error = engine
+        .match_records(QueryPlan::<ToyRecord>::project(
+            records,
+            FieldSelection::named(["body"]),
+        ))
+        .expect_err("project exists as a read plan but is not executable yet");
+
+    assert!(matches!(
+        error,
+        sema_engine::Error::UnsupportedReadPlan {
+            operator: ReadOperator::Project
+        }
+    ));
 }
 
 #[test]

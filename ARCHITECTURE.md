@@ -25,6 +25,12 @@ authorization, domain validation, and their own databases.
 - `Engine` registers record families before executing database verbs.
 - `Assert` writes records through a registered record family.
 - `Match` reads records through a registered record family.
+- `ReadPlan` owns query-algebra vocabulary for `Match`, `Subscribe`, and
+  `Validate` payloads.
+- `Constrain`, `Project`, `Aggregate`, `Infer`, and `Recurse` are sema-engine
+  read-plan operators, not `signal-core` root verbs.
+- Unsupported read-plan operators return typed `UnsupportedReadPlan` errors
+  instead of pretending execution succeeded.
 - `Assert` writes one operation-log entry in the same committed write
   transaction as the domain record.
 - `operation_log_range` returns bounded replay entries by `SnapshotId`.
@@ -50,7 +56,7 @@ authorization, domain validation, and their own databases.
 
 ```mermaid
 flowchart TD
-    signal_core["signal-core<br/>SemaVerb"]
+    signal_core["signal-core<br/>SignalVerb"]
     sema["sema<br/>storage kernel"]
     engine["sema-engine<br/>database verb execution"]
     component["component daemon<br/>Kameo actor tree"]
@@ -86,19 +92,22 @@ engine.storage_kernel().write(|transaction| {
 ```
 
 This is not the final query language. It proves the layering:
-registered record family, Signal `Assert`, Signal `Match`, typed rkyv
-values, operation-log cursor, bounded log replay, table introspection,
-best-effort post-commit subscription delivery, and durable storage
-through `sema`.
+registered record family, Signal `Assert`, Signal `Match`, executable
+`ReadPlan` nodes for all/key/range reads, typed query-algebra nodes for
+future constrain/project/aggregate/infer/recurse execution, typed rkyv values,
+operation-log cursor, bounded log replay, table introspection, best-effort
+post-commit subscription delivery, and durable storage through `sema`.
 
 ## Package Order
 
 1. Record trait and table registration. Landed.
 2. Operation log and snapshot identity. Landed for `Assert`, `Match`,
    and bounded replay.
-3. `QueryPlan` / `MutationPlan` execution. Started: `All` and `Key`
-   match plans exist; mutation plans, range, index, aggregate, and
-   constrain are still future work.
+3. `QueryPlan` / `ReadPlan` / `MutationPlan` execution. Started: all rows,
+   exact key, and key range execute. `Constrain`, `Project`, `Aggregate`,
+   `Infer`, and `Recurse` exist as typed read-plan nodes and return typed
+   unsupported errors until execution semantics land. Mutation plans, indexes,
+   and executable algebra are still future work.
 4. `Subscribe` primitive with post-commit delivery. First slice landed:
    durable registration, initial snapshot, post-commit deltas with detached
    and inline sink modes, and replay cursor witnesses. Durable failure

@@ -16,6 +16,9 @@ pub enum Error {
 
     #[error("subscription sink failed before registration: {message}")]
     SubscriptionSink { message: String },
+
+    #[error("read plan operator is not implemented yet: {operator:?}")]
+    UnsupportedReadPlan { operator: crate::ReadOperator },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

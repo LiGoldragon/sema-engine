@@ -1,12 +1,12 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use signal_core::SemaVerb;
+use signal_core::SignalVerb;
 
 use crate::{RecordKey, SnapshotId, TableName};
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct OperationLogEntry {
     snapshot: SnapshotId,
-    verb: SemaVerb,
+    verb: SignalVerb,
     table_name: String,
     key: Option<RecordKey>,
 }
@@ -14,7 +14,7 @@ pub struct OperationLogEntry {
 impl OperationLogEntry {
     pub fn new(
         snapshot: SnapshotId,
-        verb: SemaVerb,
+        verb: SignalVerb,
         table: TableName,
         key: Option<RecordKey>,
     ) -> Self {
@@ -30,7 +30,7 @@ impl OperationLogEntry {
         self.snapshot
     }
 
-    pub fn verb(&self) -> SemaVerb {
+    pub fn verb(&self) -> SignalVerb {
         self.verb
     }
 

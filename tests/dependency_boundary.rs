@@ -60,3 +60,19 @@ fn sema_engine_depends_on_kernel_and_signal_core_by_git() {
     assert!(!cargo.contains("path = \"../sema\""));
     assert!(!cargo.contains("path = \"../signal-core\""));
 }
+
+#[test]
+fn signal_core_roots_do_not_own_read_plan_vocabulary() {
+    let fixture = RepositoryFixture::current();
+    let source =
+        fs::read_to_string(fixture.root.join("src/query.rs")).expect("query source is readable");
+    let cargo = fixture.cargo_toml();
+
+    for operator in ["Constrain", "Project", "Aggregate", "Infer", "Recurse"] {
+        assert!(
+            source.contains(operator),
+            "{operator} must live in sema-engine read-plan vocabulary"
+        );
+    }
+    assert!(cargo.contains("signal-core"));
+}

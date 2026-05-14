@@ -460,7 +460,7 @@ dependencies = [
 [[package]]
 name = "signal-core"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-core.git#1299471abadc315f0327957b67fe5446aa5211d2"
+source = "git+https://github.com/LiGoldragon/signal-core.git#1bceb10814fb51853ad6f5eafcf2c478632ea8ef"
 dependencies = [
  "nota-codec",
  "rkyv",

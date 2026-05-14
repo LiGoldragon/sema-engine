@@ -2,7 +2,7 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use signal_core::SemaVerb;
+use signal_core::SignalVerb;
 
 use crate::{QueryFilter, QueryPlan, QuerySnapshot, RecordKey, SnapshotId, TableName};
 
@@ -214,9 +214,9 @@ pub enum DeltaKind {
 }
 
 impl DeltaKind {
-    pub fn verb(&self) -> SemaVerb {
+    pub fn verb(&self) -> SignalVerb {
         match self {
-            Self::Assert => SemaVerb::Assert,
+            Self::Assert => SignalVerb::Assert,
         }
     }
 }
@@ -362,10 +362,7 @@ impl<RecordValue> ActiveSubscription<RecordValue> {
     }
 
     fn matches(&self, key: &RecordKey) -> bool {
-        match self.plan.filter() {
-            QueryFilter::All => true,
-            QueryFilter::Key(expected) => expected == key,
-        }
+        self.plan.filter().accepts(key)
     }
 }
 

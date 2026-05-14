@@ -6,7 +6,7 @@ use sema_engine::{
     Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, SnapshotId, TableDescriptor,
     TableName,
 };
-use signal_core::SemaVerb;
+use signal_core::SignalVerb;
 use tempfile::TempDir;
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -71,7 +71,7 @@ fn assert_writes_operation_log_entry_with_committed_snapshot() {
     let log = engine.operation_log().expect("operation log reads");
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].snapshot(), SnapshotId::new(1));
-    assert_eq!(log[0].verb(), SemaVerb::Assert);
+    assert_eq!(log[0].verb(), SignalVerb::Assert);
     assert_eq!(log[0].table_name(), "logged_records");
     assert_eq!(log[0].key().map(RecordKey::as_str), Some("alpha"));
 }

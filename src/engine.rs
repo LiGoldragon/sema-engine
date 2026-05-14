@@ -84,7 +84,7 @@ impl Engine {
         let snapshot = self.next_snapshot()?;
         let operation = OperationLogEntry::new(
             snapshot,
-            signal_core::SemaVerb::Assert,
+            signal_core::SignalVerb::Assert,
             *assertion.table().name(),
             Some(key.clone()),
         );
@@ -102,7 +102,7 @@ impl Engine {
             .deliver_assert(*assertion.table().name(), &key, snapshot, &record)?;
 
         Ok(crate::MutationReceipt::new(
-            signal_core::SemaVerb::Assert,
+            signal_core::SignalVerb::Assert,
             *assertion.table().name(),
             key,
             snapshot,
@@ -127,24 +127,48 @@ impl Engine {
         }
 
         let snapshot = self.latest_snapshot()?;
-        let records = self.storage.read(|transaction| match query.filter() {
-            crate::QueryFilter::All => Ok(query
-                .table()
-                .sema_table()
-                .iter(transaction)?
-                .into_iter()
-                .map(|(_key, record)| record)
-                .collect()),
-            crate::QueryFilter::Key(key) => Ok(query
-                .table()
-                .sema_table()
-                .get(transaction, key.to_owned_string())?
-                .into_iter()
-                .collect()),
-        })?;
+        let records = match query.read_plan().node() {
+            crate::ReadPlanNode::AllRows => self.storage.read(|transaction| {
+                Ok(query
+                    .table()
+                    .sema_table()
+                    .iter(transaction)?
+                    .into_iter()
+                    .map(|(_key, record)| record)
+                    .collect())
+            })?,
+            crate::ReadPlanNode::ByKey(key) => self.storage.read(|transaction| {
+                Ok(query
+                    .table()
+                    .sema_table()
+                    .get(transaction, key.to_owned_string())?
+                    .into_iter()
+                    .collect())
+            })?,
+            crate::ReadPlanNode::ByKeyRange(range) => self.storage.read(|transaction| {
+                Ok(query
+                    .table()
+                    .sema_table()
+                    .iter(transaction)?
+                    .into_iter()
+                    .filter_map(|(key, record)| {
+                        if range.contains(&crate::RecordKey::new(key)) {
+                            Some(record)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect())
+            })?,
+            node => {
+                return Err(Error::UnsupportedReadPlan {
+                    operator: node.operator(),
+                });
+            }
+        };
 
         Ok(QuerySnapshot::new(
-            signal_core::SemaVerb::Match,
+            signal_core::SignalVerb::Match,
             *query.table().name(),
             snapshot,
             records,

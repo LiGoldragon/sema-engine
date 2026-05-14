@@ -1,4 +1,4 @@
-use signal_core::SemaVerb;
+use signal_core::SignalVerb;
 
 use crate::{EngineRecord, RecordKey, SnapshotId, TableName, TableReference};
 
@@ -24,14 +24,14 @@ impl<RecordValue> Assertion<RecordValue> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationReceipt {
-    verb: SemaVerb,
+    verb: SignalVerb,
     table: TableName,
     key: RecordKey,
     snapshot: SnapshotId,
 }
 
 impl MutationReceipt {
-    pub fn new(verb: SemaVerb, table: TableName, key: RecordKey, snapshot: SnapshotId) -> Self {
+    pub fn new(verb: SignalVerb, table: TableName, key: RecordKey, snapshot: SnapshotId) -> Self {
         Self {
             verb,
             table,
@@ -40,7 +40,7 @@ impl MutationReceipt {
         }
     }
 
-    pub fn verb(&self) -> SemaVerb {
+    pub fn verb(&self) -> SignalVerb {
         self.verb
     }
 
