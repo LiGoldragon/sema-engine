@@ -19,6 +19,9 @@ authorization, domain validation, and their own databases.
 - `sema-engine` does not depend on `signal-persona-*` contract crates.
 - `Engine` owns a `sema::Sema` handle.
 - `Engine` opens storage through `Sema::open_with_schema`.
+- Consumers that still have unmigrated component-local tables use
+  `Engine::storage_kernel()` rather than opening a second `sema::Sema`
+  handle to the same redb file.
 - `Engine` registers record families before executing database verbs.
 - `Assert` writes records through a registered record family.
 - `Match` reads records through a registered record family.
@@ -63,6 +66,10 @@ let mut engine = Engine::open(request)?;
 let family = engine.register_table(TableDescriptor::new(TableName::new("thoughts")))?;
 engine.assert(Assertion::new(family.clone(), thought))?;
 let snapshot = engine.match_records(QueryPlan::all(family))?;
+engine.storage_kernel().write(|transaction| {
+    // temporary component-local tables that have not moved to engine verbs yet
+    Ok(())
+})?;
 ```
 
 This is not the final query language. It proves the layering:
@@ -85,7 +92,8 @@ values, operation-log cursor, and durable storage through `sema`.
 
 - No schema-less storage open.
 - No raw byte slot store.
-- No direct component database access from this crate.
+- No second redb handle for a component database already opened by
+  `Engine`.
 - No actors in this crate.
 - No text parser in this crate.
 - No daemon process in this crate.

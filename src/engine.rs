@@ -163,6 +163,10 @@ impl Engine {
         self.storage.path()
     }
 
+    pub fn storage_kernel(&self) -> &sema::Sema {
+        &self.storage
+    }
+
     fn next_snapshot(&self) -> Result<SnapshotId> {
         Ok(self.latest_snapshot()?.next())
     }
