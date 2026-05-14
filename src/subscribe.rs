@@ -261,7 +261,17 @@ impl SubscriptionDeliveryFailure {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionDeliveryMode {
+    Detached,
+    Inline,
+}
+
 pub trait SubscriptionSink<RecordValue>: Send + Sync {
+    fn delivery_mode(&self) -> SubscriptionDeliveryMode {
+        SubscriptionDeliveryMode::Detached
+    }
+
     fn deliver(&self, event: SubscriptionEvent<RecordValue>) -> Result<(), SinkError>;
 }
 
@@ -396,9 +406,17 @@ where
             snapshot,
             record.clone(),
         );
-        let sink = Arc::clone(&self.sink);
-        drop(std::thread::spawn(move || {
-            let _ = sink.deliver(SubscriptionEvent::Delta(delta));
-        }));
+        let event = SubscriptionEvent::Delta(delta);
+        match self.sink.delivery_mode() {
+            SubscriptionDeliveryMode::Detached => {
+                let sink = Arc::clone(&self.sink);
+                drop(std::thread::spawn(move || {
+                    let _ = sink.deliver(event);
+                }));
+            }
+            SubscriptionDeliveryMode::Inline => {
+                let _ = self.sink.deliver(event);
+            }
+        }
     }
 }

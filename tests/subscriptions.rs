@@ -7,7 +7,8 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
     Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, SequenceRange, SinkError,
-    SnapshotId, SubscriptionEvent, SubscriptionSink, TableDescriptor, TableName,
+    SnapshotId, SubscriptionDeliveryMode, SubscriptionEvent, SubscriptionSink, TableDescriptor,
+    TableName,
 };
 use tempfile::TempDir;
 
@@ -124,6 +125,33 @@ impl SubscriptionSink<SubscribedRecord> for DeltaFailingSink {
                 Err(SinkError::new("queue full"))
             }
         }
+    }
+}
+
+struct InlineRecordEventLog {
+    events: Mutex<Vec<SubscriptionEvent<SubscribedRecord>>>,
+}
+
+impl InlineRecordEventLog {
+    fn new() -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn events(&self) -> Vec<SubscriptionEvent<SubscribedRecord>> {
+        self.events.lock().expect("events lock").clone()
+    }
+}
+
+impl SubscriptionSink<SubscribedRecord> for InlineRecordEventLog {
+    fn delivery_mode(&self) -> SubscriptionDeliveryMode {
+        SubscriptionDeliveryMode::Inline
+    }
+
+    fn deliver(&self, event: SubscriptionEvent<SubscribedRecord>) -> Result<(), SinkError> {
+        self.events.lock().expect("events lock").push(event);
+        Ok(())
     }
 }
 
@@ -272,6 +300,36 @@ fn subscribe_sink_failure_does_not_roll_back_commit() {
         matched.records(),
         &[SubscribedRecord::new("alpha", "committed")]
     );
+}
+
+#[test]
+fn subscribe_inline_sink_receives_delta_before_assert_returns() {
+    let fixture = SubscriptionFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.descriptor())
+        .expect("table registers");
+    let sink = Arc::new(InlineRecordEventLog::new());
+    engine
+        .subscribe(QueryPlan::all(records), sink.clone())
+        .expect("subscription succeeds");
+
+    let receipt = engine
+        .assert(Assertion::new(
+            records,
+            SubscribedRecord::new("alpha", "inline"),
+        ))
+        .expect("assert succeeds");
+
+    assert_eq!(receipt.snapshot(), SnapshotId::new(1));
+    assert!(sink.events().iter().any(|event| {
+        matches!(
+            event,
+            SubscriptionEvent::Delta(delta)
+                if delta.snapshot() == SnapshotId::new(1)
+                    && delta.record() == &SubscribedRecord::new("alpha", "inline")
+        )
+    }));
 }
 
 #[test]

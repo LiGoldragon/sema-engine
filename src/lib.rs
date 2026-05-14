@@ -26,7 +26,7 @@ pub use record::{EngineRecord, EngineStoredRecord, RecordKey};
 pub use snapshot::SnapshotId;
 pub use subscribe::{
     DeltaKind, InitialSnapshot, SequenceRange, SinkError, SubscriptionDeliveryFailure,
-    SubscriptionDelta, SubscriptionEvent, SubscriptionHandle, SubscriptionId, SubscriptionReceipt,
-    SubscriptionRegistration, SubscriptionSink,
+    SubscriptionDeliveryMode, SubscriptionDelta, SubscriptionEvent, SubscriptionHandle,
+    SubscriptionId, SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink,
 };
 pub use table::{TableDescriptor, TableName, TableReference};
