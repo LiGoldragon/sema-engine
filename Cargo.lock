@@ -460,7 +460,7 @@ dependencies = [
 [[package]]
 name = "signal-core"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-core.git#dd12794276ce48cc41dcceb97416476e54421f50"
+source = "git+https://github.com/LiGoldragon/signal-core.git#25212c0d2a3f6403e8131d8db4b810e14fdd826b"
 dependencies = [
  "nota-codec",
  "rkyv",
@@ -471,7 +471,7 @@ dependencies = [
 [[package]]
 name = "signal-core-macros"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-core.git#dd12794276ce48cc41dcceb97416476e54421f50"
+source = "git+https://github.com/LiGoldragon/signal-core.git#25212c0d2a3f6403e8131d8db4b810e14fdd826b"
 dependencies = [
  "proc-macro2",
  "quote",
