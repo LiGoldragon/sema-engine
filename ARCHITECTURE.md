@@ -19,21 +19,37 @@ authorization, domain validation, and their own databases.
 - `sema-engine` does not depend on `signal-persona-*` contract crates.
 - `Engine` owns a `sema::Sema` handle.
 - `Engine` opens storage through `Sema::open_with_schema`.
+- `Engine` is a single-owner handle. Snapshot allocation and prevalidation
+  read transactions sit outside the write transaction, so concurrent
+  callers on the same `Engine` can race the commit log. Component daemons
+  must own each `Engine` from one actor and serialise all engine calls
+  through that actor.
 - Consumers that still have unmigrated component-local tables use
   `Engine::storage_kernel()` rather than opening a second `sema::Sema`
   handle to the same redb file.
 - `Engine` registers record families before executing database verbs.
 - `Assert` writes records through a registered record family.
+- `Assert` rejects records whose key already exists in the table with a
+  typed `DuplicateAssertKey` error — `Mutate` is the only replacement
+  path. The same check runs inside `Engine::commit` for any
+  `WriteOperation::Assert` entry; failure rolls back the whole bundle.
 - `Mutate` replaces existing records through a registered record family.
 - `Retract` removes existing records through a registered record family.
-- `Engine::commit` commits a multi-operation `Request<Payload>` whose
-  `NonEmpty<Operation>` sequence is the atomic unit. Atomicity is
-  **structural** — the request's operation sequence is the boundary, not
-  a separate verb.
-- `Mutate` and `Retract` reject missing records with typed errors.
+- `Engine::commit` takes the engine-native `CommitRequest<RecordValue>`
+  whose non-empty `Vec<WriteOperation<RecordValue>>` is the atomic unit
+  for one registered table. Atomicity is **structural** — the commit's
+  operation sequence is the boundary, not a separate verb. The
+  `signal_core::Request<Payload>` carried on the wire is a different,
+  payload-typed shape; each consumer daemon dispatches its
+  domain-payload request into per-variant engine calls
+  (`assert` / `mutate` / `retract` / `commit`).
+- `Mutate` and `Retract` reject missing records with typed
+  `RecordNotFound` errors.
 - A multi-op commit rejects empty requests (impossible by `NonEmpty`
-  type), duplicate write keys, and missing mutation or retraction
-  records with typed errors before writing.
+  type), duplicate write keys within one commit (`DuplicateWriteKey`),
+  duplicate Assert keys against table state (`DuplicateAssertKey`), and
+  missing mutation or retraction records (`RecordNotFound`) with typed
+  errors before writing.
 - `Match` reads records through a registered record family.
 - `Validate` dry-runs executable read plans through a registered record
   family without mutating storage.
@@ -74,9 +90,6 @@ authorization, domain validation, and their own databases.
   deterministic post-commit ordering without polling.
 - Component domain validation happens before calling `Engine`.
 - Component actors own ordering, supervision, sockets, and delivery.
-- Subscribe lands before component-level live subscription delivery.
-- First real consumer migration is `persona-mind`.
-- Criome migrates after `persona-mind`.
 
 ## Boundary
 
@@ -100,78 +113,48 @@ responsibilities.
 
 ## Current Surface
 
-The current package implements the first useful engine surface:
+A component daemon registers a record family, dispatches its typed
+domain requests into per-variant engine calls, and reads through typed
+plans:
 
 ```rust
-let request = EngineOpen::new(database_path, SchemaVersion::new(1));
-let mut engine = Engine::open(request)?;
+let mut engine = Engine::open(EngineOpen::new(database_path, SchemaVersion::new(1)))?;
 let family = engine.register_table(TableDescriptor::new(TableName::new("thoughts")))?;
-engine.assert(Assertion::new(family.clone(), thought))?;
+
+// Single-op writes
+engine.assert(Assertion::new(family.clone(), new_thought))?;
 engine.mutate(Mutation::new(family.clone(), updated_thought))?;
 engine.retract(Retraction::new(family.clone(), retired_key))?;
+
 // Multi-op commit — atomic by request structure, not a separate verb.
-let request = RequestBuilder::new()
-    .with(MindRequest::SubmitThought(new_thought))
-    .with(MindRequest::StatusChange(latest_thought))
-    .with(MindRequest::RoleRelease(obsolete_key))
-    .build()?;
-engine.commit(request)?;
-let snapshot = engine.match_records(QueryPlan::all(family))?;
-let validation = engine.validate(QueryPlan::all(family))?;
+// The engine takes an engine-native CommitRequest<RecordValue>, not a
+// signal_core::Request<Payload>. Each consumer maps its typed request
+// into per-variant engine calls.
+engine.commit(
+    CommitRequest::new(family.clone())
+        .assert(new_thought)
+        .mutate(updated_thought)
+        .retract(retired_key),
+)?;
+
+let snapshot = engine.match_records(QueryPlan::all(family.clone()))?;
+let validation = engine.validate(QueryPlan::all(family.clone()))?;
 let _tables = engine.list_tables();
 let _log = engine.commit_log_range(SequenceRange::from(snapshot.snapshot()))?;
-let _subscription = engine.subscribe(QueryPlan::all(family), sink)?;
+let _subscription = engine.subscribe(QueryPlan::all(family.clone()), sink)?;
 engine.storage_kernel().write(|transaction| {
     // temporary component-local tables that have not moved to engine verbs yet
     Ok(())
 })?;
 ```
 
-This is not the final query language. It proves the layering:
-registered record family, Signal `Assert`, `Mutate`, `Retract`,
-structural multi-op commit, Signal `Match`, Signal `Validate`,
+This proves the layering: registered record family, single-op `Assert` /
+`Mutate` / `Retract`, structural multi-op `commit`, `Match`, `Validate`,
 executable `ReadPlan` nodes for all/key/range reads, typed query-algebra
 nodes for future constrain/project/aggregate/infer/recurse execution,
 typed rkyv values, commit-log cursor, bounded log replay, table
 introspection, best-effort post-commit subscription delivery for write
 verbs, and durable storage through `sema`.
-
-## Package Order
-
-1. Record trait and table registration. Landed.
-2. Commit log and snapshot identity. Landed for `Assert`, `Match`,
-   and bounded replay.
-3. `QueryPlan` / `ReadPlan` / `MutationPlan` execution. Started: all rows,
-   exact key, and key range execute. Multi-op `Request<Payload>` is the
-   first executable write-bundle plan. `Constrain`, `Project`, `Aggregate`,
-   `Infer`, and `Recurse` exist as typed read-plan nodes and return typed
-   unsupported errors until execution semantics land. Indexes and wider
-   executable algebra are still future work.
-4. `Subscribe` primitive with post-commit delivery. First slice landed:
-   durable registration, initial snapshot, post-commit deltas with detached
-   and inline sink modes, and replay cursor witnesses. Durable failure
-   counters and consumer rebind helpers are still future work.
-5. `Validate` dry-run and table introspection. Started:
-   `list_tables()` and `Engine::validate` exist; index introspection is still
-   future work.
-6. `persona-mind` migration. First graph Assert/Match and Subscribe consumer
-   slices have landed; further graph query/mutation widening still belongs to
-   the consumer migration.
-7. Criome migration.
-
-## Rename Map (from the seven-root spine, pre-2026-05-15)
-
-| Old name | New name |
-|---|---|
-| `SignalVerb::Atomic` | (no replacement — atomicity is structural) |
-| `AtomicBatch` | `RequestBuilder<Payload>` in `signal-core`; `WriteBatch` or `CommitRequest` inside the engine |
-| `AtomicOperation` | `Operation<Payload>` in `signal-core`; `WriteOperation` inside the engine |
-| `AtomicReceipt` | `CommitReceipt` |
-| `Engine::atomic` | `Engine::commit` |
-| `Error::EmptyAtomicBatch` | type-level impossible via `NonEmpty<Operation>` (or `Error::EmptyCommit` if kept) |
-| `Error::DuplicateAtomicKey` | `Error::DuplicateWriteKey` |
-| `OperationLogEntry { verb: SignalVerb, ... }` | `CommitLogEntry { snapshot, operation_count, operations: NonEmpty<CommitLogOperation> }` |
-| `operation_log_range` | `commit_log_range` |
 
 ## Non-Goals
 
