@@ -80,26 +80,25 @@ fn signal_core_roots_do_not_own_read_plan_vocabulary() {
 }
 
 #[test]
-fn signal_verb_spine_is_closed_at_seven_roots_without_structure() {
+fn signal_verb_spine_is_closed_at_six_roots_without_atomic() {
     let roots = [
         SignalVerb::Assert,
         SignalVerb::Mutate,
         SignalVerb::Retract,
         SignalVerb::Match,
         SignalVerb::Subscribe,
-        SignalVerb::Atomic,
         SignalVerb::Validate,
     ];
 
-    assert_eq!(roots.len(), 7);
+    assert_eq!(roots.len(), 6);
     for root in roots {
-        assert!(SevenRootWitness::accepts(root));
+        assert!(SixRootWitness::accepts(root));
     }
 }
 
-struct SevenRootWitness;
+struct SixRootWitness;
 
-impl SevenRootWitness {
+impl SixRootWitness {
     fn accepts(verb: SignalVerb) -> bool {
         match verb {
             SignalVerb::Assert
@@ -107,7 +106,6 @@ impl SevenRootWitness {
             | SignalVerb::Retract
             | SignalVerb::Match
             | SignalVerb::Subscribe
-            | SignalVerb::Atomic
             | SignalVerb::Validate => true,
         }
     }

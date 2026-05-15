@@ -57,7 +57,7 @@ impl LogFixture {
 }
 
 #[test]
-fn assert_writes_operation_log_entry_with_committed_snapshot() {
+fn assert_writes_commit_log_entry_with_committed_snapshot() {
     let fixture = LogFixture::new();
     let mut engine = fixture.open_engine();
     let records = engine
@@ -68,16 +68,17 @@ fn assert_writes_operation_log_entry_with_committed_snapshot() {
         .expect("assert succeeds");
 
     assert_eq!(receipt.snapshot(), SnapshotId::new(1));
-    let log = engine.operation_log().expect("operation log reads");
+    let log = engine.commit_log().expect("commit log reads");
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].snapshot(), SnapshotId::new(1));
-    assert_eq!(log[0].verb(), SignalVerb::Assert);
-    assert_eq!(log[0].table_name(), "logged_records");
-    assert_eq!(log[0].key().map(RecordKey::as_str), Some("alpha"));
+    let head = log[0].operations().head();
+    assert_eq!(head.verb(), SignalVerb::Assert);
+    assert_eq!(head.table_name(), "logged_records");
+    assert_eq!(head.key().map(RecordKey::as_str), Some("alpha"));
 }
 
 #[test]
-fn operation_log_and_snapshot_cursor_survive_reopen() {
+fn commit_log_and_snapshot_cursor_survive_reopen() {
     let fixture = LogFixture::new();
     {
         let mut engine = fixture.open_engine();
@@ -99,12 +100,14 @@ fn operation_log_and_snapshot_cursor_survive_reopen() {
     let snapshot = reopened
         .match_records(QueryPlan::all(records))
         .expect("match succeeds");
-    let log = reopened.operation_log().expect("operation log reads");
+    let log = reopened.commit_log().expect("commit log reads");
 
     assert_eq!(snapshot.snapshot(), SnapshotId::new(2));
     assert_eq!(snapshot.records().len(), 2);
     assert_eq!(log.len(), 2);
     assert_eq!(log[0].snapshot(), SnapshotId::new(1));
+    assert_eq!(log[0].operations().head().verb(), SignalVerb::Assert);
     assert_eq!(log[1].snapshot(), SnapshotId::new(2));
+    assert_eq!(log[1].operations().head().verb(), SignalVerb::Assert);
     assert_eq!(reopened.latest_snapshot().unwrap(), SnapshotId::new(2));
 }

@@ -6,7 +6,7 @@ use std::time::Duration;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
-    Assertion, AtomicBatch, DeltaKind, Engine, EngineOpen, EngineRecord, Mutation, QueryPlan,
+    Assertion, CommitRequest, DeltaKind, Engine, EngineOpen, EngineRecord, Mutation, QueryPlan,
     RecordKey, Retraction, SequenceRange, SinkError, SnapshotId, SubscriptionDeliveryMode,
     SubscriptionEvent, SubscriptionSink, TableDescriptor, TableName,
 };
@@ -310,7 +310,7 @@ fn subscribe_delta_kind_tracks_write_verb() {
 }
 
 #[test]
-fn subscribe_atomic_bundle_delivers_per_operation_deltas_after_single_snapshot_commit() {
+fn subscribe_commit_bundle_delivers_per_operation_deltas_after_single_snapshot_commit() {
     let fixture = SubscriptionFixture::new();
     let mut engine = fixture.open_engine();
     let records = engine
@@ -334,13 +334,13 @@ fn subscribe_atomic_bundle_delivers_per_operation_deltas_after_single_snapshot_c
         .expect("subscription succeeds");
 
     let receipt = engine
-        .atomic(
-            AtomicBatch::new(records)
+        .commit(
+            CommitRequest::new(records)
                 .assert(SubscribedRecord::new("beta", "new"))
                 .mutate(SubscribedRecord::new("alpha", "second"))
                 .retract(RecordKey::new("gamma")),
         )
-        .expect("atomic bundle succeeds");
+        .expect("commit bundle succeeds");
 
     let delta_facts = sink
         .events()
@@ -513,7 +513,7 @@ fn subscribe_survives_process_restart_as_registration() {
 }
 
 #[test]
-fn operation_log_range_replays_from_snapshot_cursor() {
+fn commit_log_range_replays_from_snapshot_cursor() {
     let fixture = SubscriptionFixture::new();
     let mut engine = fixture.open_engine();
     let records = engine
@@ -533,10 +533,17 @@ fn operation_log_range_replays_from_snapshot_cursor() {
         .expect("second assert succeeds");
 
     let replay = engine
-        .operation_log_range(SequenceRange::from(SnapshotId::new(2)))
-        .expect("operation log range reads");
+        .commit_log_range(SequenceRange::from(SnapshotId::new(2)))
+        .expect("commit log range reads");
 
     assert_eq!(replay.len(), 1);
     assert_eq!(replay[0].snapshot(), SnapshotId::new(2));
-    assert_eq!(replay[0].key().map(RecordKey::as_str), Some("beta"));
+    assert_eq!(
+        replay[0]
+            .operations()
+            .head()
+            .key()
+            .map(RecordKey::as_str),
+        Some("beta")
+    );
 }

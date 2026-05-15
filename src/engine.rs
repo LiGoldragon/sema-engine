@@ -8,13 +8,15 @@ use rkyv::validation::Validator;
 use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use sema::{Schema, SchemaVersion};
+use signal_core::NonEmpty;
 
+use crate::log::{CommitLogEntry, CommitLogOperation};
 use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
-    AtomicBatch, AtomicOperation, Catalog, DeltaKind, EngineStoredRecord, Error, InitialSnapshot,
-    OperationLogEntry, QueryPlan, QuerySnapshot, Result, Retraction, SequenceRange, SnapshotId,
-    SubscriptionHandle, SubscriptionId, SubscriptionReceipt, SubscriptionRegistration,
-    SubscriptionSink, TableDescriptor, TableReference, TableRegistration,
+    Catalog, CommitRequest, DeltaKind, EngineStoredRecord, Error, InitialSnapshot, QueryPlan,
+    QuerySnapshot, Result, Retraction, SequenceRange, SnapshotId, SubscriptionHandle,
+    SubscriptionId, SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink,
+    TableDescriptor, TableReference, TableRegistration, WriteOperation,
 };
 
 const CATALOG: sema::Table<&'static str, TableRegistration> =
@@ -22,8 +24,8 @@ const CATALOG: sema::Table<&'static str, TableRegistration> =
 const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
 const LATEST_SNAPSHOT_KEY: &str = "latest_snapshot";
 const NEXT_SUBSCRIPTION_KEY: &str = "next_subscription";
-const OPERATION_LOG: sema::Table<u64, OperationLogEntry> =
-    sema::Table::new("__sema_engine_operation_log");
+const COMMIT_LOG: sema::Table<u64, CommitLogEntry> =
+    sema::Table::new("__sema_engine_commit_log");
 const SUBSCRIPTIONS: sema::Table<u64, SubscriptionRegistration> =
     sema::Table::new("__sema_engine_subscriptions");
 
@@ -79,11 +81,13 @@ impl Engine {
         let key = assertion.record().record_key();
         let record = assertion.record().clone();
         let snapshot = self.next_snapshot()?;
-        let operation = OperationLogEntry::new(
+        let entry = CommitLogEntry::single(
             snapshot,
-            signal_core::SignalVerb::Assert,
-            *assertion.table().name(),
-            Some(key.clone()),
+            CommitLogOperation::new(
+                signal_core::SignalVerb::Assert,
+                *assertion.table().name(),
+                Some(key.clone()),
+            ),
         );
         self.storage.write(|transaction| {
             assertion.table().sema_table().insert(
@@ -91,7 +95,7 @@ impl Engine {
                 key.to_owned_string(),
                 assertion.record(),
             )?;
-            OPERATION_LOG.insert(transaction, snapshot.value(), &operation)?;
+            COMMIT_LOG.insert(transaction, snapshot.value(), &entry)?;
             COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
             Ok(())
         })?;
@@ -140,11 +144,13 @@ impl Engine {
 
         let record = mutation.record().clone();
         let snapshot = self.next_snapshot()?;
-        let operation = OperationLogEntry::new(
+        let entry = CommitLogEntry::single(
             snapshot,
-            signal_core::SignalVerb::Mutate,
-            *mutation.table().name(),
-            Some(key.clone()),
+            CommitLogOperation::new(
+                signal_core::SignalVerb::Mutate,
+                *mutation.table().name(),
+                Some(key.clone()),
+            ),
         );
         self.storage.write(|transaction| {
             mutation.table().sema_table().insert(
@@ -152,7 +158,7 @@ impl Engine {
                 key.to_owned_string(),
                 mutation.record(),
             )?;
-            OPERATION_LOG.insert(transaction, snapshot.value(), &operation)?;
+            COMMIT_LOG.insert(transaction, snapshot.value(), &entry)?;
             COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
             Ok(())
         })?;
@@ -197,11 +203,13 @@ impl Engine {
 
         let key = retraction.key().clone();
         let snapshot = self.next_snapshot()?;
-        let operation = OperationLogEntry::new(
+        let entry = CommitLogEntry::single(
             snapshot,
-            signal_core::SignalVerb::Retract,
-            *retraction.table().name(),
-            Some(key.clone()),
+            CommitLogOperation::new(
+                signal_core::SignalVerb::Retract,
+                *retraction.table().name(),
+                Some(key.clone()),
+            ),
         );
         let removed = self.storage.write(|transaction| {
             let removed = retraction
@@ -209,7 +217,7 @@ impl Engine {
                 .sema_table()
                 .remove(transaction, key.to_owned_string())?;
             if removed {
-                OPERATION_LOG.insert(transaction, snapshot.value(), &operation)?;
+                COMMIT_LOG.insert(transaction, snapshot.value(), &entry)?;
                 COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
             }
             Ok(removed)
@@ -233,10 +241,13 @@ impl Engine {
         ))
     }
 
-    pub fn atomic<RecordValue>(
+    /// Commit a multi-operation write transaction. Renamed from `atomic`
+    /// per DA/62 §5; atomicity is structural via the [`CommitRequest`]
+    /// shape.
+    pub fn commit<RecordValue>(
         &self,
-        batch: AtomicBatch<RecordValue>,
-    ) -> Result<crate::AtomicReceipt>
+        request: CommitRequest<RecordValue>,
+    ) -> Result<crate::CommitReceipt>
     where
         RecordValue: EngineStoredRecord + Send + Sync + 'static,
         <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
@@ -244,87 +255,107 @@ impl Engine {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
-        self.ensure_registered(batch.table())?;
-        if batch.operations().is_empty() {
-            return Err(Error::EmptyAtomicBatch {
-                table: batch.table().name().as_str().to_owned(),
+        self.ensure_registered(request.table())?;
+        if request.operations().is_empty() {
+            return Err(Error::EmptyCommit {
+                table: request.table().name().as_str().to_owned(),
             });
         }
 
         let mut effect_keys = HashSet::new();
         let mut effects = Vec::new();
-        for operation in batch.operations() {
+        let mut log_operations = Vec::with_capacity(request.operation_count());
+        for operation in request.operations() {
             match operation {
-                AtomicOperation::Assert(record) => {
+                WriteOperation::Assert(record) => {
                     let key = record.record_key();
                     if !effect_keys.insert(key.clone()) {
-                        return Err(self.duplicate_atomic_key(batch.table(), &key));
+                        return Err(self.duplicate_write_key(request.table(), &key));
                     }
-                    effects.push(AtomicEffect::new(DeltaKind::Assert, key, record.clone()));
+                    log_operations.push(CommitLogOperation::new(
+                        signal_core::SignalVerb::Assert,
+                        *request.table().name(),
+                        Some(key.clone()),
+                    ));
+                    effects.push(CommittedEffect::new(DeltaKind::Assert, key, record.clone()));
                 }
-                AtomicOperation::Mutate(record) => {
+                WriteOperation::Mutate(record) => {
                     let key = record.record_key();
                     if !effect_keys.insert(key.clone()) {
-                        return Err(self.duplicate_atomic_key(batch.table(), &key));
+                        return Err(self.duplicate_write_key(request.table(), &key));
                     }
                     if self
                         .storage
                         .read(|transaction| {
-                            batch
+                            request
                                 .table()
                                 .sema_table()
                                 .get(transaction, key.to_owned_string())
                         })?
                         .is_none()
                     {
-                        return Err(self.record_not_found(batch.table(), &key));
+                        return Err(self.record_not_found(request.table(), &key));
                     }
-                    effects.push(AtomicEffect::new(DeltaKind::Mutate, key, record.clone()));
+                    log_operations.push(CommitLogOperation::new(
+                        signal_core::SignalVerb::Mutate,
+                        *request.table().name(),
+                        Some(key.clone()),
+                    ));
+                    effects.push(CommittedEffect::new(DeltaKind::Mutate, key, record.clone()));
                 }
-                AtomicOperation::Retract(key) => {
+                WriteOperation::Retract(key) => {
                     if !effect_keys.insert(key.clone()) {
-                        return Err(self.duplicate_atomic_key(batch.table(), key));
+                        return Err(self.duplicate_write_key(request.table(), key));
                     }
                     let Some(record) = self.storage.read(|transaction| {
-                        batch
+                        request
                             .table()
                             .sema_table()
                             .get(transaction, key.to_owned_string())
                     })?
                     else {
-                        return Err(self.record_not_found(batch.table(), key));
+                        return Err(self.record_not_found(request.table(), key));
                     };
-                    effects.push(AtomicEffect::new(DeltaKind::Retract, key.clone(), record));
+                    log_operations.push(CommitLogOperation::new(
+                        signal_core::SignalVerb::Retract,
+                        *request.table().name(),
+                        Some(key.clone()),
+                    ));
+                    effects.push(CommittedEffect::new(
+                        DeltaKind::Retract,
+                        key.clone(),
+                        record,
+                    ));
                 }
             }
         }
 
         let snapshot = self.next_snapshot()?;
-        let operation = OperationLogEntry::new(
+        let entry = CommitLogEntry::new(
             snapshot,
-            signal_core::SignalVerb::Atomic,
-            *batch.table().name(),
-            None,
+            NonEmpty::try_from_vec(log_operations).map_err(|_| Error::EmptyCommit {
+                table: request.table().name().as_str().to_owned(),
+            })?,
         );
         self.storage.write(|transaction| {
-            for operation in batch.operations() {
+            for operation in request.operations() {
                 match operation {
-                    AtomicOperation::Assert(record) | AtomicOperation::Mutate(record) => {
-                        batch.table().sema_table().insert(
+                    WriteOperation::Assert(record) | WriteOperation::Mutate(record) => {
+                        request.table().sema_table().insert(
                             transaction,
                             record.record_key().to_owned_string(),
                             record,
                         )?;
                     }
-                    AtomicOperation::Retract(key) => {
-                        let _removed = batch
+                    WriteOperation::Retract(key) => {
+                        let _removed = request
                             .table()
                             .sema_table()
                             .remove(transaction, key.to_owned_string())?;
                     }
                 }
             }
-            OPERATION_LOG.insert(transaction, snapshot.value(), &operation)?;
+            COMMIT_LOG.insert(transaction, snapshot.value(), &entry)?;
             COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
             Ok(())
         })?;
@@ -332,18 +363,17 @@ impl Engine {
         for effect in &effects {
             self.subscriptions.deliver_delta(
                 effect.kind(),
-                *batch.table().name(),
+                *request.table().name(),
                 effect.key(),
                 snapshot,
                 effect.record(),
             )?;
         }
 
-        Ok(crate::AtomicReceipt::new(
-            signal_core::SignalVerb::Atomic,
-            *batch.table().name(),
+        Ok(crate::CommitReceipt::new(
+            *request.table().name(),
             snapshot,
-            batch.operation_count(),
+            request.operation_count(),
         ))
     }
 
@@ -440,18 +470,18 @@ impl Engine {
         Ok(value)
     }
 
-    pub fn operation_log(&self) -> Result<Vec<OperationLogEntry>> {
+    pub fn commit_log(&self) -> Result<Vec<CommitLogEntry>> {
         Ok(self
             .storage
-            .read(|transaction| OPERATION_LOG.iter(transaction))?
+            .read(|transaction| COMMIT_LOG.iter(transaction))?
             .into_iter()
             .map(|(_sequence, entry)| entry)
             .collect())
     }
 
-    pub fn operation_log_range(&self, range: SequenceRange) -> Result<Vec<OperationLogEntry>> {
+    pub fn commit_log_range(&self, range: SequenceRange) -> Result<Vec<CommitLogEntry>> {
         Ok(self
-            .operation_log()?
+            .commit_log()?
             .into_iter()
             .filter(|entry| range.contains(entry.snapshot()))
             .collect())
@@ -532,12 +562,12 @@ impl Engine {
         }
     }
 
-    fn duplicate_atomic_key<RecordValue>(
+    fn duplicate_write_key<RecordValue>(
         &self,
         table: &TableReference<RecordValue>,
         key: &crate::RecordKey,
     ) -> Error {
-        Error::DuplicateAtomicKey {
+        Error::DuplicateWriteKey {
             table: table.name().as_str().to_owned(),
             key: key.to_owned_string(),
         }
@@ -576,13 +606,13 @@ impl Engine {
     }
 }
 
-struct AtomicEffect<RecordValue> {
+struct CommittedEffect<RecordValue> {
     kind: DeltaKind,
     key: crate::RecordKey,
     record: RecordValue,
 }
 
-impl<RecordValue> AtomicEffect<RecordValue> {
+impl<RecordValue> CommittedEffect<RecordValue> {
     fn new(kind: DeltaKind, key: crate::RecordKey, record: RecordValue) -> Self {
         Self { kind, key, record }
     }

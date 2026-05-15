@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
-    AggregatePlan, Assertion, AtomicBatch, Engine, EngineOpen, EngineRecord, FieldSelection,
+    AggregatePlan, Assertion, CommitRequest, Engine, EngineOpen, EngineRecord, FieldSelection,
     KeyRange, Mutation, QueryPlan, ReadOperator, RecordKey, RecursionMode, Retraction, RuleSetRef,
     SnapshotId, TableDescriptor, TableName, UnificationPlan,
 };
@@ -177,19 +177,19 @@ fn engine_executes_mutate_and_retract_over_existing_record_family() {
     let removed = engine
         .match_records(QueryPlan::key(records, RecordKey::new("alpha")))
         .expect("match after retract succeeds");
-    let log = engine.operation_log().expect("operation log reads");
+    let log = engine.commit_log().expect("commit log reads");
 
     assert_eq!(retraction.verb(), SignalVerb::Retract);
     assert_eq!(retraction.snapshot(), SnapshotId::new(3));
     assert!(removed.records().is_empty());
     assert_eq!(log.len(), 3);
-    assert_eq!(log[0].verb(), SignalVerb::Assert);
-    assert_eq!(log[1].verb(), SignalVerb::Mutate);
-    assert_eq!(log[2].verb(), SignalVerb::Retract);
+    assert_eq!(log[0].operations().head().verb(), SignalVerb::Assert);
+    assert_eq!(log[1].operations().head().verb(), SignalVerb::Mutate);
+    assert_eq!(log[2].operations().head().verb(), SignalVerb::Retract);
 }
 
 #[test]
-fn validate_dry_run_returns_validate_receipt_without_operation_log_write() {
+fn validate_dry_run_returns_validate_receipt_without_commit_log_write() {
     let fixture = EngineFixture::new();
     let mut engine = fixture.open_engine();
     let records = engine
@@ -198,12 +198,12 @@ fn validate_dry_run_returns_validate_receipt_without_operation_log_write() {
     engine
         .assert(Assertion::new(records, ToyRecord::new("alpha", "first")))
         .expect("assert succeeds");
-    let log_before = engine.operation_log().expect("operation log reads");
+    let log_before = engine.commit_log().expect("commit log reads");
 
     let receipt = engine
         .validate(QueryPlan::key(records, RecordKey::new("alpha")))
         .expect("validate succeeds");
-    let log_after = engine.operation_log().expect("operation log reads again");
+    let log_after = engine.commit_log().expect("commit log reads again");
 
     assert_eq!(receipt.verb(), SignalVerb::Validate);
     assert_eq!(receipt.table().as_str(), "toy_records");
@@ -236,7 +236,7 @@ fn validate_uses_same_typed_plan_errors_as_match() {
 }
 
 #[test]
-fn atomic_commits_write_bundle_under_one_snapshot() {
+fn commit_lands_write_bundle_under_one_snapshot() {
     let fixture = EngineFixture::new();
     let mut engine = fixture.open_engine();
     let records = engine
@@ -250,19 +250,18 @@ fn atomic_commits_write_bundle_under_one_snapshot() {
         .expect("second seed succeeds");
 
     let receipt = engine
-        .atomic(
-            AtomicBatch::new(records)
+        .commit(
+            CommitRequest::new(records)
                 .assert(ToyRecord::new("beta", "new"))
                 .mutate(ToyRecord::new("alpha", "second"))
                 .retract(RecordKey::new("gamma")),
         )
-        .expect("atomic bundle succeeds");
+        .expect("commit bundle succeeds");
     let snapshot = engine
         .match_records(QueryPlan::all(records))
         .expect("match succeeds");
-    let log = engine.operation_log().expect("operation log reads");
+    let log = engine.commit_log().expect("commit log reads");
 
-    assert_eq!(receipt.verb(), SignalVerb::Atomic);
     assert_eq!(receipt.snapshot(), SnapshotId::new(3));
     assert_eq!(receipt.operation_count(), 3);
     assert_eq!(
@@ -273,13 +272,17 @@ fn atomic_commits_write_bundle_under_one_snapshot() {
         ]
     );
     assert_eq!(log.len(), 3);
-    assert_eq!(log[2].verb(), SignalVerb::Atomic);
-    assert_eq!(log[2].snapshot(), SnapshotId::new(3));
-    assert!(log[2].key().is_none());
+    let multi = &log[2];
+    assert_eq!(multi.snapshot(), SnapshotId::new(3));
+    assert_eq!(multi.operation_count(), 3);
+    let operations = multi.operations();
+    assert_eq!(operations.head().verb(), SignalVerb::Assert);
+    assert_eq!(operations.tail()[0].verb(), SignalVerb::Mutate);
+    assert_eq!(operations.tail()[1].verb(), SignalVerb::Retract);
 }
 
 #[test]
-fn atomic_missing_record_rolls_back_entire_bundle() {
+fn commit_missing_record_rolls_back_entire_bundle() {
     let fixture = EngineFixture::new();
     let mut engine = fixture.open_engine();
     let records = engine
@@ -287,29 +290,24 @@ fn atomic_missing_record_rolls_back_entire_bundle() {
         .expect("table registers");
 
     let error = engine
-        .atomic(
-            AtomicBatch::new(records)
+        .commit(
+            CommitRequest::new(records)
                 .assert(ToyRecord::new("beta", "should not persist"))
                 .mutate(ToyRecord::new("missing", "body")),
         )
         .expect_err("missing mutation rejects the whole bundle");
     let snapshot = engine
         .match_records(QueryPlan::all(records))
-        .expect("match succeeds after failed atomic");
+        .expect("match succeeds after failed commit");
 
     assert!(matches!(error, sema_engine::Error::RecordNotFound { .. }));
     assert!(snapshot.records().is_empty());
-    assert!(
-        engine
-            .operation_log()
-            .expect("operation log reads")
-            .is_empty()
-    );
+    assert!(engine.commit_log().expect("commit log reads").is_empty());
     assert_eq!(engine.latest_snapshot().unwrap(), SnapshotId::genesis());
 }
 
 #[test]
-fn atomic_empty_batch_returns_typed_error() {
+fn commit_empty_batch_returns_typed_error() {
     let fixture = EngineFixture::new();
     let mut engine = fixture.open_engine();
     let records = engine
@@ -317,14 +315,14 @@ fn atomic_empty_batch_returns_typed_error() {
         .expect("table registers");
 
     let error = engine
-        .atomic(AtomicBatch::<ToyRecord>::new(records))
-        .expect_err("empty atomic batch is rejected");
+        .commit(CommitRequest::<ToyRecord>::new(records))
+        .expect_err("empty commit request is rejected");
 
-    assert!(matches!(error, sema_engine::Error::EmptyAtomicBatch { .. }));
+    assert!(matches!(error, sema_engine::Error::EmptyCommit { .. }));
 }
 
 #[test]
-fn atomic_duplicate_keys_return_typed_error_before_writing() {
+fn commit_duplicate_keys_return_typed_error_before_writing() {
     let fixture = EngineFixture::new();
     let mut engine = fixture.open_engine();
     let records = engine
@@ -335,8 +333,8 @@ fn atomic_duplicate_keys_return_typed_error_before_writing() {
         .expect("seed succeeds");
 
     let error = engine
-        .atomic(
-            AtomicBatch::new(records)
+        .commit(
+            CommitRequest::new(records)
                 .mutate(ToyRecord::new("alpha", "second"))
                 .retract(RecordKey::new("alpha")),
         )
@@ -344,15 +342,12 @@ fn atomic_duplicate_keys_return_typed_error_before_writing() {
     let snapshot = engine
         .match_records(QueryPlan::key(records, RecordKey::new("alpha")))
         .expect("match succeeds after duplicate-key rejection");
-    let log = engine.operation_log().expect("operation log reads");
+    let log = engine.commit_log().expect("commit log reads");
 
-    assert!(matches!(
-        error,
-        sema_engine::Error::DuplicateAtomicKey { .. }
-    ));
+    assert!(matches!(error, sema_engine::Error::DuplicateWriteKey { .. }));
     assert_eq!(snapshot.records(), &[ToyRecord::new("alpha", "first")]);
     assert_eq!(log.len(), 1);
-    assert_eq!(log[0].verb(), SignalVerb::Assert);
+    assert_eq!(log[0].operations().head().verb(), SignalVerb::Assert);
     assert_eq!(engine.latest_snapshot().unwrap(), SnapshotId::new(1));
 }
 
@@ -379,12 +374,7 @@ fn mutate_and_retract_missing_records_return_typed_errors() {
         retraction_error,
         sema_engine::Error::RecordNotFound { .. }
     ));
-    assert!(
-        engine
-            .operation_log()
-            .expect("operation log reads")
-            .is_empty()
-    );
+    assert!(engine.commit_log().expect("commit log reads").is_empty());
 }
 
 #[test]

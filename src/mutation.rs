@@ -115,13 +115,17 @@ impl<RecordValue> Retraction<RecordValue> {
     }
 }
 
+/// A request to commit one or more typed write operations as one
+/// transaction. Single-op uses a length-1 batch.
+///
+/// Renamed from `AtomicBatch` per DA/62 §5 — atomicity is structural.
 #[derive(Debug, Clone)]
-pub struct AtomicBatch<RecordValue> {
+pub struct CommitRequest<RecordValue> {
     table: TableReference<RecordValue>,
-    operations: Vec<AtomicOperation<RecordValue>>,
+    operations: Vec<WriteOperation<RecordValue>>,
 }
 
-impl<RecordValue> AtomicBatch<RecordValue> {
+impl<RecordValue> CommitRequest<RecordValue> {
     pub fn new(table: TableReference<RecordValue>) -> Self {
         Self {
             table,
@@ -130,17 +134,17 @@ impl<RecordValue> AtomicBatch<RecordValue> {
     }
 
     pub fn assert(mut self, record: RecordValue) -> Self {
-        self.operations.push(AtomicOperation::Assert(record));
+        self.operations.push(WriteOperation::Assert(record));
         self
     }
 
     pub fn mutate(mut self, record: RecordValue) -> Self {
-        self.operations.push(AtomicOperation::Mutate(record));
+        self.operations.push(WriteOperation::Mutate(record));
         self
     }
 
     pub fn retract(mut self, key: RecordKey) -> Self {
-        self.operations.push(AtomicOperation::Retract(key));
+        self.operations.push(WriteOperation::Retract(key));
         self
     }
 
@@ -148,7 +152,7 @@ impl<RecordValue> AtomicBatch<RecordValue> {
         &self.table
     }
 
-    pub fn operations(&self) -> &[AtomicOperation<RecordValue>] {
+    pub fn operations(&self) -> &[WriteOperation<RecordValue>] {
         &self.operations
     }
 
@@ -157,38 +161,43 @@ impl<RecordValue> AtomicBatch<RecordValue> {
     }
 }
 
+/// One typed write effect inside a [`CommitRequest`]. Renamed from
+/// `AtomicOperation` per DA/62 §5.
 #[derive(Debug, Clone)]
-pub enum AtomicOperation<RecordValue> {
+pub enum WriteOperation<RecordValue> {
     Assert(RecordValue),
     Mutate(RecordValue),
     Retract(RecordKey),
 }
 
+impl<RecordValue> WriteOperation<RecordValue> {
+    pub fn verb(&self) -> SignalVerb {
+        match self {
+            Self::Assert(_) => SignalVerb::Assert,
+            Self::Mutate(_) => SignalVerb::Mutate,
+            Self::Retract(_) => SignalVerb::Retract,
+        }
+    }
+}
+
+/// Receipt from a successful [`crate::Engine::commit`]. The receipt
+/// names the committed snapshot and the number of per-operation
+/// effects. The top-level no longer carries a single `SignalVerb` —
+/// per-operation verbs live in the commit log entry per DA/62 §5.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AtomicReceipt {
-    verb: SignalVerb,
+pub struct CommitReceipt {
     table: TableName,
     snapshot: SnapshotId,
     operation_count: usize,
 }
 
-impl AtomicReceipt {
-    pub fn new(
-        verb: SignalVerb,
-        table: TableName,
-        snapshot: SnapshotId,
-        operation_count: usize,
-    ) -> Self {
+impl CommitReceipt {
+    pub fn new(table: TableName, snapshot: SnapshotId, operation_count: usize) -> Self {
         Self {
-            verb,
             table,
             snapshot,
             operation_count,
         }
-    }
-
-    pub fn verb(&self) -> SignalVerb {
-        self.verb
     }
 
     pub fn table(&self) -> &TableName {

@@ -19,9 +19,9 @@ pub mod table;
 pub use catalog::{Catalog, TableRegistration};
 pub use engine::{Engine, EngineOpen};
 pub use error::{Error, Result};
-pub use log::OperationLogEntry;
+pub use log::{CommitLogEntry, CommitLogOperation};
 pub use mutation::{
-    Assertion, AtomicBatch, AtomicOperation, AtomicReceipt, Mutation, MutationReceipt, Retraction,
+    Assertion, CommitReceipt, CommitRequest, Mutation, MutationReceipt, Retraction, WriteOperation,
 };
 pub use query::{
     AggregatePlan, FieldSelection, KeyRange, PredicatePlan, QueryFilter, QueryPlan, QuerySnapshot,
