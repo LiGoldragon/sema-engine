@@ -539,11 +539,7 @@ fn commit_log_range_replays_from_snapshot_cursor() {
     assert_eq!(replay.len(), 1);
     assert_eq!(replay[0].snapshot(), SnapshotId::new(2));
     assert_eq!(
-        replay[0]
-            .operations()
-            .head()
-            .key()
-            .map(RecordKey::as_str),
+        replay[0].operations().head().key().map(RecordKey::as_str),
         Some("beta")
     );
 }

@@ -344,7 +344,10 @@ fn commit_duplicate_keys_return_typed_error_before_writing() {
         .expect("match succeeds after duplicate-key rejection");
     let log = engine.commit_log().expect("commit log reads");
 
-    assert!(matches!(error, sema_engine::Error::DuplicateWriteKey { .. }));
+    assert!(matches!(
+        error,
+        sema_engine::Error::DuplicateWriteKey { .. }
+    ));
     assert_eq!(snapshot.records(), &[ToyRecord::new("alpha", "first")]);
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].operations().head().verb(), SignalVerb::Assert);

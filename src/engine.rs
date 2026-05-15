@@ -24,8 +24,7 @@ const CATALOG: sema::Table<&'static str, TableRegistration> =
 const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
 const LATEST_SNAPSHOT_KEY: &str = "latest_snapshot";
 const NEXT_SUBSCRIPTION_KEY: &str = "next_subscription";
-const COMMIT_LOG: sema::Table<u64, CommitLogEntry> =
-    sema::Table::new("__sema_engine_commit_log");
+const COMMIT_LOG: sema::Table<u64, CommitLogEntry> = sema::Table::new("__sema_engine_commit_log");
 const SUBSCRIPTIONS: sema::Table<u64, SubscriptionRegistration> =
     sema::Table::new("__sema_engine_subscriptions");
 
