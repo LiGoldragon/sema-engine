@@ -466,7 +466,7 @@ dependencies = [
 [[package]]
 name = "signal-core"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-core.git#1dcd91584df93806facac9cdfa76d72e051afc74"
+source = "git+https://github.com/LiGoldragon/signal-core.git#29006d41cf977c3db129e97e46fce3fc51b19cd4"
 dependencies = [
  "nota-codec",
  "paste",
