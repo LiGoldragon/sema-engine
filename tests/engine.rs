@@ -381,6 +381,70 @@ fn mutate_and_retract_missing_records_return_typed_errors() {
 }
 
 #[test]
+fn assert_against_existing_key_returns_typed_duplicate_assert_error() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+    engine
+        .assert(Assertion::new(records, ToyRecord::new("alpha", "first")))
+        .expect("seed assert succeeds");
+
+    let error = engine
+        .assert(Assertion::new(
+            records,
+            ToyRecord::new("alpha", "overwrite attempt"),
+        ))
+        .expect_err("assert against existing key is rejected");
+    let snapshot = engine
+        .match_records(QueryPlan::key(records, RecordKey::new("alpha")))
+        .expect("match succeeds after duplicate-assert rejection");
+    let log = engine.commit_log().expect("commit log reads");
+
+    assert!(matches!(
+        error,
+        sema_engine::Error::DuplicateAssertKey { .. }
+    ));
+    assert_eq!(snapshot.records(), &[ToyRecord::new("alpha", "first")]);
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].operations().head().verb(), SignalVerb::Assert);
+    assert_eq!(engine.latest_snapshot().unwrap(), SnapshotId::new(1));
+}
+
+#[test]
+fn commit_assert_against_existing_key_rolls_back_entire_bundle() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+    engine
+        .assert(Assertion::new(records, ToyRecord::new("alpha", "first")))
+        .expect("seed assert succeeds");
+
+    let error = engine
+        .commit(
+            CommitRequest::new(records)
+                .assert(ToyRecord::new("beta", "should not persist"))
+                .assert(ToyRecord::new("alpha", "overwrite attempt")),
+        )
+        .expect_err("commit with duplicate assert key is rejected");
+    let snapshot = engine
+        .match_records(QueryPlan::all(records))
+        .expect("match succeeds after rejection");
+    let log = engine.commit_log().expect("commit log reads");
+
+    assert!(matches!(
+        error,
+        sema_engine::Error::DuplicateAssertKey { .. }
+    ));
+    assert_eq!(snapshot.records(), &[ToyRecord::new("alpha", "first")]);
+    assert_eq!(log.len(), 1);
+    assert_eq!(engine.latest_snapshot().unwrap(), SnapshotId::new(1));
+}
+
+#[test]
 fn sema_engine_owns_demoted_read_plan_operator_vocabulary() {
     let fixture = EngineFixture::new();
     let mut engine = fixture.open_engine();

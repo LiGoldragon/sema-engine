@@ -20,6 +20,9 @@ pub enum Error {
     #[error("commit request contains duplicate key: {table}/{key}")]
     DuplicateWriteKey { table: String, key: String },
 
+    #[error("assert key already exists: {table}/{key}")]
+    DuplicateAssertKey { table: String, key: String },
+
     #[error("subscription registry lock poisoned")]
     SubscriptionRegistryPoisoned,
 

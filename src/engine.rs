@@ -78,6 +78,19 @@ impl Engine {
         self.ensure_registered(assertion.table())?;
 
         let key = assertion.record().record_key();
+        if self
+            .storage
+            .read(|transaction| {
+                assertion
+                    .table()
+                    .sema_table()
+                    .get(transaction, key.to_owned_string())
+            })?
+            .is_some()
+        {
+            return Err(self.duplicate_assert_key(assertion.table(), &key));
+        }
+
         let record = assertion.record().clone();
         let snapshot = self.next_snapshot()?;
         let entry = CommitLogEntry::single(
@@ -270,6 +283,18 @@ impl Engine {
                     let key = record.record_key();
                     if !effect_keys.insert(key.clone()) {
                         return Err(self.duplicate_write_key(request.table(), &key));
+                    }
+                    if self
+                        .storage
+                        .read(|transaction| {
+                            request
+                                .table()
+                                .sema_table()
+                                .get(transaction, key.to_owned_string())
+                        })?
+                        .is_some()
+                    {
+                        return Err(self.duplicate_assert_key(request.table(), &key));
                     }
                     log_operations.push(CommitLogOperation::new(
                         signal_core::SignalVerb::Assert,
@@ -567,6 +592,17 @@ impl Engine {
         key: &crate::RecordKey,
     ) -> Error {
         Error::DuplicateWriteKey {
+            table: table.name().as_str().to_owned(),
+            key: key.to_owned_string(),
+        }
+    }
+
+    fn duplicate_assert_key<RecordValue>(
+        &self,
+        table: &TableReference<RecordValue>,
+        key: &crate::RecordKey,
+    ) -> Error {
+        Error::DuplicateAssertKey {
             table: table.name().as_str().to_owned(),
             key: key.to_owned_string(),
         }
