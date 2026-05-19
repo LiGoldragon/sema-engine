@@ -1,4 +1,4 @@
-use signal_core::SignalVerb;
+use signal_sema::SemaOperation;
 
 use crate::{EngineRecord, RecordKey, SnapshotId, TableName, TableReference};
 
@@ -24,24 +24,29 @@ impl<RecordValue> Assertion<RecordValue> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationReceipt {
-    verb: SignalVerb,
+    operation: SemaOperation,
     table: TableName,
     key: RecordKey,
     snapshot: SnapshotId,
 }
 
 impl MutationReceipt {
-    pub fn new(verb: SignalVerb, table: TableName, key: RecordKey, snapshot: SnapshotId) -> Self {
+    pub fn new(
+        operation: SemaOperation,
+        table: TableName,
+        key: RecordKey,
+        snapshot: SnapshotId,
+    ) -> Self {
         Self {
-            verb,
+            operation,
             table,
             key,
             snapshot,
         }
     }
 
-    pub fn verb(&self) -> SignalVerb {
-        self.verb
+    pub fn operation(&self) -> SemaOperation {
+        self.operation
     }
 
     pub fn table(&self) -> &TableName {
@@ -116,7 +121,7 @@ impl<RecordValue> Retraction<RecordValue> {
 }
 
 /// A request to commit one or more typed write operations as one
-/// transaction. Single-op uses a length-1 batch.
+/// transaction. Single-operation uses a length-1 batch.
 ///
 /// Renamed from `AtomicBatch` per DA/62 §5 — atomicity is structural.
 #[derive(Debug, Clone)]
@@ -171,19 +176,19 @@ pub enum WriteOperation<RecordValue> {
 }
 
 impl<RecordValue> WriteOperation<RecordValue> {
-    pub fn verb(&self) -> SignalVerb {
+    pub fn operation(&self) -> SemaOperation {
         match self {
-            Self::Assert(_) => SignalVerb::Assert,
-            Self::Mutate(_) => SignalVerb::Mutate,
-            Self::Retract(_) => SignalVerb::Retract,
+            Self::Assert(_) => SemaOperation::Assert,
+            Self::Mutate(_) => SemaOperation::Mutate,
+            Self::Retract(_) => SemaOperation::Retract,
         }
     }
 }
 
 /// Receipt from a successful [`crate::Engine::commit`]. The receipt
 /// names the committed snapshot and the number of per-operation
-/// effects. The top-level no longer carries a single `SignalVerb` —
-/// per-operation verbs live in the commit log entry per DA/62 §5.
+/// effects. The top-level no longer carries a single operation;
+/// per-operation effects live in the commit log entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitReceipt {
     table: TableName,

@@ -1,7 +1,7 @@
 //! Full typed database engine over the `sema` storage kernel.
 //!
-//! `Engine` composes `sema::Sema` and executes Signal-shaped database
-//! verbs over registered typed record families. Components own daemons,
+//! `Engine` composes `sema::Sema` and executes Sema database operations
+//! over registered typed record families. Components own daemons,
 //! actors, sockets, authorization, and domain validation; this crate is
 //! only the reusable engine library.
 

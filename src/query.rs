@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use signal_core::SignalVerb;
+use signal_sema::SemaOperation;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -383,7 +383,7 @@ impl RecursionMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuerySnapshot<RecordValue> {
-    verb: SignalVerb,
+    operation: SemaOperation,
     table: TableName,
     snapshot: SnapshotId,
     records: Vec<RecordValue>,
@@ -391,21 +391,21 @@ pub struct QuerySnapshot<RecordValue> {
 
 impl<RecordValue> QuerySnapshot<RecordValue> {
     pub fn new(
-        verb: SignalVerb,
+        operation: SemaOperation,
         table: TableName,
         snapshot: SnapshotId,
         records: Vec<RecordValue>,
     ) -> Self {
         Self {
-            verb,
+            operation,
             table,
             snapshot,
             records,
         }
     }
 
-    pub fn verb(&self) -> SignalVerb {
-        self.verb
+    pub fn operation(&self) -> SemaOperation {
+        self.operation
     }
 
     pub fn table(&self) -> &TableName {
@@ -423,7 +423,7 @@ impl<RecordValue> QuerySnapshot<RecordValue> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationReceipt {
-    verb: SignalVerb,
+    operation: SemaOperation,
     table: TableName,
     snapshot: SnapshotId,
     record_count: usize,
@@ -431,21 +431,21 @@ pub struct ValidationReceipt {
 
 impl ValidationReceipt {
     pub fn new(
-        verb: SignalVerb,
+        operation: SemaOperation,
         table: TableName,
         snapshot: SnapshotId,
         record_count: usize,
     ) -> Self {
         Self {
-            verb,
+            operation,
             table,
             snapshot,
             record_count,
         }
     }
 
-    pub fn verb(&self) -> SignalVerb {
-        self.verb
+    pub fn operation(&self) -> SemaOperation {
+        self.operation
     }
 
     pub fn table(&self) -> &TableName {

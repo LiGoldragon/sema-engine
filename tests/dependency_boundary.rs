@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use signal_core::SignalVerb;
+use signal_sema::SemaOperation;
 
 struct RepositoryFixture {
     root: PathBuf,
@@ -53,18 +53,20 @@ fn sema_engine_has_no_runtime_or_text_dependencies() {
 }
 
 #[test]
-fn sema_engine_depends_on_kernel_and_signal_core_by_git() {
+fn sema_engine_depends_on_kernel_signal_core_and_signal_sema_by_git() {
     let fixture = RepositoryFixture::current();
     let cargo = fixture.cargo_toml();
 
     assert!(cargo.contains("https://github.com/LiGoldragon/sema.git"));
     assert!(cargo.contains("https://github.com/LiGoldragon/signal-core.git"));
+    assert!(cargo.contains("https://github.com/LiGoldragon/signal-sema.git"));
     assert!(!cargo.contains("path = \"../sema\""));
     assert!(!cargo.contains("path = \"../signal-core\""));
+    assert!(!cargo.contains("path = \"../signal-sema\""));
 }
 
 #[test]
-fn signal_core_roots_do_not_own_read_plan_vocabulary() {
+fn sema_engine_owns_read_plan_vocabulary() {
     let fixture = RepositoryFixture::current();
     let source =
         fs::read_to_string(fixture.root.join("src/query.rs")).expect("query source is readable");
@@ -76,37 +78,37 @@ fn signal_core_roots_do_not_own_read_plan_vocabulary() {
             "{operator} must live in sema-engine read-plan vocabulary"
         );
     }
-    assert!(cargo.contains("signal-core"));
+    assert!(cargo.contains("signal-sema"));
 }
 
 #[test]
-fn signal_verb_spine_is_closed_at_six_roots_without_atomic() {
-    let roots = [
-        SignalVerb::Assert,
-        SignalVerb::Mutate,
-        SignalVerb::Retract,
-        SignalVerb::Match,
-        SignalVerb::Subscribe,
-        SignalVerb::Validate,
+fn signal_sema_operation_set_is_closed_at_six_operations_without_atomic() {
+    let operations = [
+        SemaOperation::Assert,
+        SemaOperation::Mutate,
+        SemaOperation::Retract,
+        SemaOperation::Match,
+        SemaOperation::Subscribe,
+        SemaOperation::Validate,
     ];
 
-    assert_eq!(roots.len(), 6);
-    for root in roots {
-        assert!(SixRootWitness::accepts(root));
+    assert_eq!(operations.len(), 6);
+    for operation in operations {
+        assert!(SemaOperationWitness::accepts(operation));
     }
 }
 
-struct SixRootWitness;
+struct SemaOperationWitness;
 
-impl SixRootWitness {
-    fn accepts(verb: SignalVerb) -> bool {
-        match verb {
-            SignalVerb::Assert
-            | SignalVerb::Mutate
-            | SignalVerb::Retract
-            | SignalVerb::Match
-            | SignalVerb::Subscribe
-            | SignalVerb::Validate => true,
+impl SemaOperationWitness {
+    fn accepts(operation: SemaOperation) -> bool {
+        match operation {
+            SemaOperation::Assert
+            | SemaOperation::Mutate
+            | SemaOperation::Retract
+            | SemaOperation::Match
+            | SemaOperation::Subscribe
+            | SemaOperation::Validate => true,
         }
     }
 }

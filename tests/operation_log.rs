@@ -6,7 +6,7 @@ use sema_engine::{
     Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, SnapshotId, TableDescriptor,
     TableName,
 };
-use signal_core::SignalVerb;
+use signal_sema::SemaOperation;
 use tempfile::TempDir;
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -72,7 +72,7 @@ fn assert_writes_commit_log_entry_with_committed_snapshot() {
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].snapshot(), SnapshotId::new(1));
     let head = log[0].operations().head();
-    assert_eq!(head.verb(), SignalVerb::Assert);
+    assert_eq!(head.operation(), SemaOperation::Assert);
     assert_eq!(head.table_name(), "logged_records");
     assert_eq!(head.key().map(RecordKey::as_str), Some("alpha"));
 }
@@ -106,8 +106,14 @@ fn commit_log_and_snapshot_cursor_survive_reopen() {
     assert_eq!(snapshot.records().len(), 2);
     assert_eq!(log.len(), 2);
     assert_eq!(log[0].snapshot(), SnapshotId::new(1));
-    assert_eq!(log[0].operations().head().verb(), SignalVerb::Assert);
+    assert_eq!(
+        log[0].operations().head().operation(),
+        SemaOperation::Assert
+    );
     assert_eq!(log[1].snapshot(), SnapshotId::new(2));
-    assert_eq!(log[1].operations().head().verb(), SignalVerb::Assert);
+    assert_eq!(
+        log[1].operations().head().operation(),
+        SemaOperation::Assert
+    );
     assert_eq!(reopened.latest_snapshot().unwrap(), SnapshotId::new(2));
 }

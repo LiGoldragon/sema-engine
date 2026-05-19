@@ -270,7 +270,7 @@ fn subscribe_delta_fires_after_commit_is_visible() {
 }
 
 #[test]
-fn subscribe_delta_kind_tracks_write_verb() {
+fn subscribe_delta_kind_tracks_write_operation() {
     let fixture = SubscriptionFixture::new();
     let mut engine = fixture.open_engine();
     let records = engine

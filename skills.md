@@ -11,7 +11,7 @@ This repository follows the workspace skills in `/home/li/primary/skills/`.
 - Do not introduce NOTA here; text projection lives at CLI/debug
   boundaries.
 - Do not introduce `signal-persona-*` dependencies here; component
-  contracts compile their domain records into engine plans.
+  daemons lower their domain records into engine plans.
 - Add a constraint test when adding an architectural rule.
 - Subscription delivery is post-commit. Tests must prove a failing or
   blocking sink does not roll back or freeze the write path.

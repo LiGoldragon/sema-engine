@@ -5,7 +5,7 @@ sits between the `sema` storage kernel and state-bearing component
 daemons.
 
 `sema` opens redb files, validates format/schema, and reads/writes typed
-rkyv tables. `sema-engine` executes database-shaped Signal verbs over
+rkyv tables. `sema-engine` executes `signal-sema` database operations over
 registered record families. Component daemons own actors, sockets,
 authorization, domain validation, and their own databases.
 
@@ -27,7 +27,7 @@ authorization, domain validation, and their own databases.
 - Consumers that still have unmigrated component-local tables use
   `Engine::storage_kernel()` rather than opening a second `sema::Sema`
   handle to the same redb file.
-- `Engine` registers record families before executing database verbs.
+- `Engine` registers record families before executing database operations.
 - `Assert` writes records through a registered record family.
 - `Assert` rejects records whose key already exists in the table with a
   typed `DuplicateAssertKey` error — `Mutate` is the only replacement
@@ -38,14 +38,13 @@ authorization, domain validation, and their own databases.
 - `Engine::commit` takes the engine-native `CommitRequest<RecordValue>`
   whose non-empty `Vec<WriteOperation<RecordValue>>` is the atomic unit
   for one registered table. Atomicity is **structural** — the commit's
-  operation sequence is the boundary, not a separate verb. The
-  `signal_core::Request<Payload>` carried on the wire is a different,
-  payload-typed shape; each consumer daemon dispatches its
-  domain-payload request into per-variant engine calls
+  operation sequence is the boundary, not a separate operation. Public
+  component contracts are different, payload-typed shapes; each consumer
+  daemon dispatches its domain-payload request into per-variant engine calls
   (`assert` / `mutate` / `retract` / `commit`).
 - `Mutate` and `Retract` reject missing records with typed
   `RecordNotFound` errors.
-- A multi-op commit rejects empty requests (impossible by `NonEmpty`
+- A multi-operation commit rejects empty requests (impossible by `NonEmpty`
   type), duplicate write keys within one commit (`DuplicateWriteKey`),
   duplicate Assert keys against table state (`DuplicateAssertKey`), and
   missing mutation or retraction records (`RecordNotFound`) with typed
@@ -54,25 +53,25 @@ authorization, domain validation, and their own databases.
 - `Validate` dry-runs executable read plans through a registered record
   family without mutating storage.
 - `ReadPlan` owns query-algebra vocabulary for `Match`, `Subscribe`, and
-  `Validate` payloads.
+  `Validate` engine operations.
 - `Constrain`, `Project`, `Aggregate`, `Infer`, and `Recurse` are sema-engine
-  read-plan operators, not `signal-core` root verbs.
-- The `SignalVerb` spine is closed at six roots: `Assert`, `Mutate`,
-  `Retract`, `Match`, `Subscribe`, and `Validate`. `Atomic` is not a verb;
-  multi-operation atomicity is structural.
-- Schema/catalog operations are catalog data under the six roots, not a
-  separate `Structure` root.
+  read-plan operators, not public contract roots.
+- The `signal_sema::SemaOperation` set is closed at six operations:
+  `Assert`, `Mutate`, `Retract`, `Match`, `Subscribe`, and `Validate`.
+  `Atomic` is not an operation; multi-operation atomicity is structural.
+- Schema/catalog operations are catalog data under the six operations, not a
+  separate `Structure` operation.
 - Unsupported read-plan operators return typed `UnsupportedReadPlan` errors
   instead of pretending execution succeeded.
 - `Assert`, `Mutate`, and `Retract` write one `CommitLogOperation` entry
   per operation in the same committed write transaction as the domain
   record.
-- A multi-op commit writes one `CommitLogEntry` containing
+- A multi-operation commit writes one `CommitLogEntry` containing
   `NonEmpty<CommitLogOperation>` in the same committed write transaction
   as the domain records.
 - `commit_log_range` returns bounded replay entries by `SnapshotId`.
 - `CommitReceipt` carries the committed `SnapshotId` and operation count.
-  Single-op and multi-op commits return the same receipt shape.
+  Single-operation and multi-operation commits return the same receipt shape.
 - `QuerySnapshot` carries the latest observed `SnapshotId`.
 - `ValidationReceipt` carries the observed `SnapshotId` and record count.
 - `Validate` does not write commit-log entries.
@@ -81,7 +80,7 @@ authorization, domain validation, and their own databases.
 - `Subscribe` registers durable subscription metadata and returns an
   initial snapshot via the request's `Reply::Accepted` outcome.
 - `Subscribe` emits deltas only after the mutation commit succeeds.
-- For a multi-op commit, `Subscribe` emits one per-operation delta after
+- For a multi-operation commit, `Subscribe` emits one per-operation delta after
   the commit succeeds; every delta shares the commit `SnapshotId`.
 - Sink delivery is downstream of the commit and cannot roll back the
   mutation.
@@ -95,13 +94,15 @@ authorization, domain validation, and their own databases.
 
 ```mermaid
 flowchart TD
-    signal_core["signal-core<br/>SignalVerb"]
+    signal_sema["signal-sema<br/>SemaOperation"]
+    signal_core["signal-core<br/>NonEmpty utility today"]
     sema["sema<br/>storage kernel"]
-    engine["sema-engine<br/>database verb execution"]
+    engine["sema-engine<br/>database operation execution"]
     component["component daemon<br/>Kameo actor tree"]
     database["component.redb"]
 
     engine --> sema
+    engine --> signal_sema
     engine --> signal_core
     component --> engine
     sema --> database
@@ -121,15 +122,14 @@ plans:
 let mut engine = Engine::open(EngineOpen::new(database_path, SchemaVersion::new(1)))?;
 let family = engine.register_table(TableDescriptor::new(TableName::new("thoughts")))?;
 
-// Single-op writes
+// Single-operation writes
 engine.assert(Assertion::new(family.clone(), new_thought))?;
 engine.mutate(Mutation::new(family.clone(), updated_thought))?;
 engine.retract(Retraction::new(family.clone(), retired_key))?;
 
-// Multi-op commit — atomic by request structure, not a separate verb.
-// The engine takes an engine-native CommitRequest<RecordValue>, not a
-// signal_core::Request<Payload>. Each consumer maps its typed request
-// into per-variant engine calls.
+// Multi-operation commit: atomic by commit structure, not a separate operation.
+// Each consumer maps its typed public contract request into per-variant
+// engine calls.
 engine.commit(
     CommitRequest::new(family.clone())
         .assert(new_thought)
@@ -143,18 +143,18 @@ let _tables = engine.list_tables();
 let _log = engine.commit_log_range(SequenceRange::from(snapshot.snapshot()))?;
 let _subscription = engine.subscribe(QueryPlan::all(family.clone()), sink)?;
 engine.storage_kernel().write(|transaction| {
-    // temporary component-local tables that have not moved to engine verbs yet
+    // temporary component-local tables that have not moved to engine operations yet
     Ok(())
 })?;
 ```
 
-This proves the layering: registered record family, single-op `Assert` /
-`Mutate` / `Retract`, structural multi-op `commit`, `Match`, `Validate`,
+This proves the layering: registered record family, single-operation `Assert` /
+`Mutate` / `Retract`, structural multi-operation `commit`, `Match`, `Validate`,
 executable `ReadPlan` nodes for all/key/range reads, typed query-algebra
 nodes for future constrain/project/aggregate/infer/recurse execution,
 typed rkyv values, commit-log cursor, bounded log replay, table
 introspection, best-effort post-commit subscription delivery for write
-verbs, and durable storage through `sema`.
+operations, and durable storage through `sema`.
 
 ## Non-Goals
 

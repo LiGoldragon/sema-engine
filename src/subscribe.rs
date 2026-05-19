@@ -2,7 +2,7 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use signal_core::SignalVerb;
+use signal_sema::SemaOperation;
 
 use crate::{QueryFilter, QueryPlan, QuerySnapshot, RecordKey, SnapshotId, TableName};
 
@@ -216,11 +216,11 @@ pub enum DeltaKind {
 }
 
 impl DeltaKind {
-    pub fn verb(&self) -> SignalVerb {
+    pub fn operation(&self) -> SemaOperation {
         match self {
-            Self::Assert => SignalVerb::Assert,
-            Self::Mutate => SignalVerb::Mutate,
-            Self::Retract => SignalVerb::Retract,
+            Self::Assert => SemaOperation::Assert,
+            Self::Mutate => SemaOperation::Mutate,
+            Self::Retract => SemaOperation::Retract,
         }
     }
 }

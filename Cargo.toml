@@ -5,7 +5,7 @@ edition      = "2024"
 rust-version = "1.85"
 license      = "MIT OR Apache-2.0"
 repository   = "https://github.com/LiGoldragon/sema-engine"
-description  = "Typed database verb engine over sema and signal-core"
+description  = "Typed database operation engine over sema and signal-sema"
 publish      = false
 
 [lib]
@@ -16,6 +16,7 @@ path = "src/lib.rs"
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 sema = { git = "https://github.com/LiGoldragon/sema.git" }
 signal-core = { git = "https://github.com/LiGoldragon/signal-core.git" }
+signal-sema = { git = "https://github.com/LiGoldragon/signal-sema.git" }
 thiserror = "2"
 
 [dev-dependencies]

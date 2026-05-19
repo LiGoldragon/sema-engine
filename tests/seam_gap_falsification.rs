@@ -142,12 +142,12 @@ fn validate_write_dissolves_into_match_records_dry_run() {
     assert_eq!(post_log_len, pre_log_len);
 
     // Verdict: the "gap" was an ergonomic preference. Component-side
-    // composition of `match_records` covers single-op write
+    // composition of `match_records` covers single-operation write
     // pre-validation in ~3 lines. No engine API extension required.
 }
 
 #[test]
-fn multi_op_write_dry_run_composes_with_match_records_plus_local_staging() {
+fn multi_operation_write_dry_run_composes_with_match_records_plus_local_staging() {
     let fixture = Fixture::new();
     let mut engine = fixture.open_engine();
     let table = engine
@@ -159,7 +159,7 @@ fn multi_op_write_dry_run_composes_with_match_records_plus_local_staging() {
         .expect("seed");
     let pre_log_len = engine.commit_log().expect("commit log").len();
 
-    // A multi-op batch the component wants to validate before
+    // A multi-operation batch the component wants to validate before
     // committing. Carries both a collision with existing data
     // ("alpha") and a within-batch duplicate ("beta" twice).
     let proposed: Vec<Thought> = vec![
@@ -189,20 +189,22 @@ fn multi_op_write_dry_run_composes_with_match_records_plus_local_staging() {
 
     assert_eq!(
         failure,
-        Some(DryRunFailure::DuplicateWithExisting(RecordKey::new("alpha"))),
+        Some(DryRunFailure::DuplicateWithExisting(RecordKey::new(
+            "alpha"
+        ))),
         "the first-found collision is the existing 'alpha' row",
     );
     let post_log_len = engine.commit_log().expect("commit log").len();
     assert_eq!(post_log_len, pre_log_len, "no engine write happened");
 
     // The whole dry-run is one `HashSet` + a `match_records` probe
-    // per op. About 12 lines of composition. The engine's own
+    // per operation. About 12 lines of composition. The engine's own
     // typed errors (`DuplicateWriteKey`, `DuplicateAssertKey`,
     // `RecordNotFound`) map onto `DryRunFailure` variants
     // one-for-one — no domain-specific re-implementation, just a
     // sequence of probes.
 
-    // Verdict: dissolves the multi-op part of Gap 1. The
+    // Verdict: dissolves the multi-operation part of Gap 1. The
     // composition is small, typed, single-responsibility.
 }
 
@@ -311,9 +313,7 @@ fn subscription_lifetime_can_be_managed_externally_via_handle_id_filter() {
     );
 
     // The engine still has the subscription registered durably.
-    let registrations = engine
-        .subscription_registrations()
-        .expect("registrations");
+    let registrations = engine.subscription_registrations().expect("registrations");
     assert_eq!(registrations.len(), 1, "engine-side registry growth");
 
     // Verdict: the supervisor pattern works for the correctness
@@ -335,7 +335,7 @@ fn subscription_lifetime_can_be_managed_externally_via_handle_id_filter() {
 //
 // Claim under test (from audit §4.2): "cross-table atomic commits
 // require `storage_kernel().write()`, bypassing the engine's
-// verb-tracking surface."
+// operation-tracking surface."
 //
 // This is a witness: what happens when a component tries to
 // express cross-table atomicity today through only the typed
@@ -397,7 +397,7 @@ fn cross_table_writes_via_two_engine_commits_are_not_engine_atomic() {
     //   `SubscriptionRegistry::deliver_delta` call).
     //
     // A multi-table write through `storage_kernel` is therefore
-    // architecturally invisible to the engine's verb-tracking
+    // architecturally invisible to the engine's operation-tracking
     // machinery. Inspectors of the commit log, subscribers
     // observing typed deltas, and snapshot-anchored callers all
     // miss the write. Per the inelegance criterion, the gap
@@ -410,7 +410,7 @@ fn cross_table_writes_via_two_engine_commits_are_not_engine_atomic() {
     // table. The gap becomes load-bearing when one logical
     // operation spans tables — e.g. a `RoleHandoff` that
     // simultaneously retracts a claim from role A and asserts
-    // it for role B, where the failure of either op should
+    // it for role B, where the failure of either operation should
     // reject both.
     //
     // Resolution paths, in order of preference:
@@ -437,7 +437,7 @@ fn read_after_write_is_two_engine_calls_with_monotonic_snapshot_ids() {
     // The wire's `Request<P>` allows mixing Assert + Match in
     // one bundle in principle (Subscribe is the only positional
     // constraint per `Request::check`). The engine doesn't
-    // support mixed verbs in one `CommitRequest`. What does the
+    // support mixed operations in one `CommitRequest`. What does the
     // composition look like through two calls?
     //
     // Two engine calls. The Match observes the same snapshot
@@ -462,7 +462,7 @@ fn read_after_write_is_two_engine_calls_with_monotonic_snapshot_ids() {
     assert_eq!(read.snapshot(), assert_receipt.snapshot());
     assert_eq!(read.records(), &[Thought::new("alpha", "after write")]);
 
-    // No gap. The audit's open question about mixed-verb
+    // No gap. The audit's open question about mixed-operation
     // request shapes is dissolved: two calls suffice, the
     // monotonic snapshot resolves the freshness question, and
     // the single-writer discipline removes the race.
@@ -499,9 +499,7 @@ fn engine_subscription_registrations_are_listable_for_introspection() {
         .subscribe(QueryPlan::all(table), sink)
         .expect("subscribe");
 
-    let registrations = engine
-        .subscription_registrations()
-        .expect("registrations");
+    let registrations = engine.subscription_registrations().expect("registrations");
     assert_eq!(registrations.len(), 1);
     assert_eq!(registrations[0].table_name(), "thoughts");
 }

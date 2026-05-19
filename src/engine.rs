@@ -9,6 +9,7 @@ use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use sema::{Schema, SchemaVersion};
 use signal_core::NonEmpty;
+use signal_sema::SemaOperation;
 
 use crate::log::{CommitLogEntry, CommitLogOperation};
 use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
@@ -96,7 +97,7 @@ impl Engine {
         let entry = CommitLogEntry::single(
             snapshot,
             CommitLogOperation::new(
-                signal_core::SignalVerb::Assert,
+                SemaOperation::Assert,
                 *assertion.table().name(),
                 Some(key.clone()),
             ),
@@ -120,7 +121,7 @@ impl Engine {
         )?;
 
         Ok(crate::MutationReceipt::new(
-            signal_core::SignalVerb::Assert,
+            SemaOperation::Assert,
             *assertion.table().name(),
             key,
             snapshot,
@@ -159,7 +160,7 @@ impl Engine {
         let entry = CommitLogEntry::single(
             snapshot,
             CommitLogOperation::new(
-                signal_core::SignalVerb::Mutate,
+                SemaOperation::Mutate,
                 *mutation.table().name(),
                 Some(key.clone()),
             ),
@@ -183,7 +184,7 @@ impl Engine {
         )?;
 
         Ok(crate::MutationReceipt::new(
-            signal_core::SignalVerb::Mutate,
+            SemaOperation::Mutate,
             *mutation.table().name(),
             key,
             snapshot,
@@ -218,7 +219,7 @@ impl Engine {
         let entry = CommitLogEntry::single(
             snapshot,
             CommitLogOperation::new(
-                signal_core::SignalVerb::Retract,
+                SemaOperation::Retract,
                 *retraction.table().name(),
                 Some(key.clone()),
             ),
@@ -246,7 +247,7 @@ impl Engine {
         )?;
 
         Ok(crate::MutationReceipt::new(
-            signal_core::SignalVerb::Retract,
+            SemaOperation::Retract,
             *retraction.table().name(),
             key,
             snapshot,
@@ -297,7 +298,7 @@ impl Engine {
                         return Err(self.duplicate_assert_key(request.table(), &key));
                     }
                     log_operations.push(CommitLogOperation::new(
-                        signal_core::SignalVerb::Assert,
+                        SemaOperation::Assert,
                         *request.table().name(),
                         Some(key.clone()),
                     ));
@@ -321,7 +322,7 @@ impl Engine {
                         return Err(self.record_not_found(request.table(), &key));
                     }
                     log_operations.push(CommitLogOperation::new(
-                        signal_core::SignalVerb::Mutate,
+                        SemaOperation::Mutate,
                         *request.table().name(),
                         Some(key.clone()),
                     ));
@@ -341,7 +342,7 @@ impl Engine {
                         return Err(self.record_not_found(request.table(), key));
                     };
                     log_operations.push(CommitLogOperation::new(
-                        signal_core::SignalVerb::Retract,
+                        SemaOperation::Retract,
                         *request.table().name(),
                         Some(key.clone()),
                     ));
@@ -456,7 +457,7 @@ impl Engine {
         };
 
         Ok(QuerySnapshot::new(
-            signal_core::SignalVerb::Match,
+            SemaOperation::Match,
             *query.table().name(),
             snapshot,
             records,
@@ -477,7 +478,7 @@ impl Engine {
         let table = *query.table().name();
         let snapshot = self.match_records(query)?;
         Ok(crate::ValidationReceipt::new(
-            signal_core::SignalVerb::Validate,
+            SemaOperation::Validate,
             table,
             snapshot.snapshot(),
             snapshot.records().len(),

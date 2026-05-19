@@ -405,6 +405,7 @@ dependencies = [
  "rkyv",
  "sema",
  "signal-core",
+ "signal-sema",
  "tempfile",
  "thiserror",
 ]
@@ -476,6 +477,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "signal-sema"
+version = "0.1.0"
+source = "git+https://github.com/LiGoldragon/signal-sema.git#7eac20e161ef715f27becb532a5478d15c6246c5"
+dependencies = [
+ "nota-codec",
+ "rkyv",
+ "thiserror",
 ]
 
 [[package]]

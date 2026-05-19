@@ -1,10 +1,11 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use signal_core::{NonEmpty, SignalVerb};
+use signal_core::NonEmpty;
+use signal_sema::SemaOperation;
 
 use crate::{RecordKey, SnapshotId, TableName};
 
 /// Durable record of one commit: a request that committed all its
-/// write effects (or none) under a single [`SnapshotId`]. A single-op
+/// write effects (or none) under a single [`SnapshotId`]. A single-operation
 /// `assert` / `mutate` / `retract` is just a length-1 commit.
 ///
 /// Note: the spec name in DA/61 §8 + DA/62 §5 is `CommitLogEntry`;
@@ -46,22 +47,22 @@ impl CommitLogEntry {
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CommitLogOperation {
-    verb: SignalVerb,
+    operation: SemaOperation,
     table_name: String,
     key: Option<RecordKey>,
 }
 
 impl CommitLogOperation {
-    pub fn new(verb: SignalVerb, table: TableName, key: Option<RecordKey>) -> Self {
+    pub fn new(operation: SemaOperation, table: TableName, key: Option<RecordKey>) -> Self {
         Self {
-            verb,
+            operation,
             table_name: table.as_str().to_owned(),
             key,
         }
     }
 
-    pub fn verb(&self) -> SignalVerb {
-        self.verb
+    pub fn operation(&self) -> SemaOperation {
+        self.operation
     }
 
     pub fn table_name(&self) -> &str {

@@ -7,7 +7,7 @@ use sema_engine::{
     KeyRange, Mutation, QueryPlan, ReadOperator, RecordKey, RecursionMode, Retraction, RuleSetRef,
     SnapshotId, TableDescriptor, TableName, UnificationPlan,
 };
-use signal_core::SignalVerb;
+use signal_sema::SemaOperation;
 use tempfile::TempDir;
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -72,7 +72,7 @@ fn engine_executes_assert_and_match_over_registered_record_family() {
         ))
         .expect("assert succeeds");
 
-    assert_eq!(receipt.verb(), SignalVerb::Assert);
+    assert_eq!(receipt.operation(), SemaOperation::Assert);
     assert_eq!(receipt.table().as_str(), "toy_records");
     assert_eq!(receipt.snapshot(), SnapshotId::new(1));
     assert_eq!(tables.len(), 1);
@@ -82,7 +82,7 @@ fn engine_executes_assert_and_match_over_registered_record_family() {
         .match_records(QueryPlan::all(records))
         .expect("match succeeds");
 
-    assert_eq!(snapshot.verb(), SignalVerb::Match);
+    assert_eq!(snapshot.operation(), SemaOperation::Match);
     assert_eq!(snapshot.snapshot(), SnapshotId::new(1));
     assert_eq!(
         snapshot.records(),
@@ -167,7 +167,7 @@ fn engine_executes_mutate_and_retract_over_existing_record_family() {
         .match_records(QueryPlan::key(records, RecordKey::new("alpha")))
         .expect("match after mutate succeeds");
 
-    assert_eq!(mutation.verb(), SignalVerb::Mutate);
+    assert_eq!(mutation.operation(), SemaOperation::Mutate);
     assert_eq!(mutation.snapshot(), SnapshotId::new(2));
     assert_eq!(updated.records(), &[ToyRecord::new("alpha", "second")]);
 
@@ -179,13 +179,22 @@ fn engine_executes_mutate_and_retract_over_existing_record_family() {
         .expect("match after retract succeeds");
     let log = engine.commit_log().expect("commit log reads");
 
-    assert_eq!(retraction.verb(), SignalVerb::Retract);
+    assert_eq!(retraction.operation(), SemaOperation::Retract);
     assert_eq!(retraction.snapshot(), SnapshotId::new(3));
     assert!(removed.records().is_empty());
     assert_eq!(log.len(), 3);
-    assert_eq!(log[0].operations().head().verb(), SignalVerb::Assert);
-    assert_eq!(log[1].operations().head().verb(), SignalVerb::Mutate);
-    assert_eq!(log[2].operations().head().verb(), SignalVerb::Retract);
+    assert_eq!(
+        log[0].operations().head().operation(),
+        SemaOperation::Assert
+    );
+    assert_eq!(
+        log[1].operations().head().operation(),
+        SemaOperation::Mutate
+    );
+    assert_eq!(
+        log[2].operations().head().operation(),
+        SemaOperation::Retract
+    );
 }
 
 #[test]
@@ -205,7 +214,7 @@ fn validate_dry_run_returns_validate_receipt_without_commit_log_write() {
         .expect("validate succeeds");
     let log_after = engine.commit_log().expect("commit log reads again");
 
-    assert_eq!(receipt.verb(), SignalVerb::Validate);
+    assert_eq!(receipt.operation(), SemaOperation::Validate);
     assert_eq!(receipt.table().as_str(), "toy_records");
     assert_eq!(receipt.snapshot(), SnapshotId::new(1));
     assert_eq!(receipt.record_count(), 1);
@@ -276,9 +285,9 @@ fn commit_lands_write_bundle_under_one_snapshot() {
     assert_eq!(multi.snapshot(), SnapshotId::new(3));
     assert_eq!(multi.operation_count(), 3);
     let operations = multi.operations();
-    assert_eq!(operations.head().verb(), SignalVerb::Assert);
-    assert_eq!(operations.tail()[0].verb(), SignalVerb::Mutate);
-    assert_eq!(operations.tail()[1].verb(), SignalVerb::Retract);
+    assert_eq!(operations.head().operation(), SemaOperation::Assert);
+    assert_eq!(operations.tail()[0].operation(), SemaOperation::Mutate);
+    assert_eq!(operations.tail()[1].operation(), SemaOperation::Retract);
 }
 
 #[test]
@@ -350,7 +359,10 @@ fn commit_duplicate_keys_return_typed_error_before_writing() {
     ));
     assert_eq!(snapshot.records(), &[ToyRecord::new("alpha", "first")]);
     assert_eq!(log.len(), 1);
-    assert_eq!(log[0].operations().head().verb(), SignalVerb::Assert);
+    assert_eq!(
+        log[0].operations().head().operation(),
+        SemaOperation::Assert
+    );
     assert_eq!(engine.latest_snapshot().unwrap(), SnapshotId::new(1));
 }
 
@@ -408,7 +420,10 @@ fn assert_against_existing_key_returns_typed_duplicate_assert_error() {
     ));
     assert_eq!(snapshot.records(), &[ToyRecord::new("alpha", "first")]);
     assert_eq!(log.len(), 1);
-    assert_eq!(log[0].operations().head().verb(), SignalVerb::Assert);
+    assert_eq!(
+        log[0].operations().head().operation(),
+        SemaOperation::Assert
+    );
     assert_eq!(engine.latest_snapshot().unwrap(), SnapshotId::new(1));
 }
 
