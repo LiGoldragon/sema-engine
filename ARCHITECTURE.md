@@ -73,6 +73,11 @@ authorization, domain validation, and their own databases.
   The sequence is a per-database high-water mark for version handover:
   a next-version daemon can copy state at sequence N, then replay commits
   from N+1 forward.
+- Failed commits do not advance `CommitSequence`. The counter is durable
+  per database and survives `Engine::close` / `Engine::open`.
+- `Engine::current_commit_sequence` returns the current high-water mark
+  so a peer reading the handover marker observes the same value the
+  next successful commit will exceed.
 - `replay_from_sequence` returns commit-log entries by `CommitSequence`.
 - `commit_log_range` returns bounded replay entries by `SnapshotId`.
 - `CommitReceipt` carries the committed `CommitSequence`, `SnapshotId`, and
@@ -161,6 +166,28 @@ nodes for future constrain/project/aggregate/infer/recurse execution,
 typed rkyv values, commit-log cursor, bounded log replay, table
 introspection, best-effort post-commit subscription delivery for write
 operations, and durable storage through `sema`.
+
+## CommitSequence — durable high-water mark for handover
+
+Every successful write transaction advances a per-database
+`CommitSequence`. The counter is the workspace's mechanism for
+zero-downtime component version handover: when a next-version daemon
+starts beside a current-version daemon and needs to copy the current
+database, it asks the current daemon for the high-water mark N, copies
+state at N, then replays commits from N+1 forward. `MutationReceipt`,
+`CommitReceipt`, and `CommitLogEntry` all carry `commit_sequence` so
+peers can observe the same value the next successful commit will exceed.
+
+`Engine::current_commit_sequence()` returns the high-water mark for use
+in handover markers. `Engine::replay_from_sequence(start)` returns
+commit-log entries by `CommitSequence` so a peer can drain deltas from
+a known point. Failed commits do not advance the counter, so a crash
+between transactions resumes cleanly at the previous high-water mark.
+
+The sequence integrates with snapshots: `SnapshotId` still drives
+subscription replay through the existing snapshot cursor;
+`CommitSequence` is the boundary for cross-daemon handover. Both are
+durable, monotonic, and per-database.
 
 ## Non-Goals
 
