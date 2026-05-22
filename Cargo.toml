@@ -16,7 +16,7 @@ path = "src/lib.rs"
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 sema = { git = "https://github.com/LiGoldragon/sema.git" }
 signal-core = { git = "https://github.com/LiGoldragon/signal-core.git", branch = "main" }
-signal-sema = { git = "https://github.com/LiGoldragon/signal-sema.git" }
+signal-sema = { git = "https://github.com/LiGoldragon/signal-sema.git", branch = "main" }
 thiserror = "2"
 
 [dev-dependencies]
