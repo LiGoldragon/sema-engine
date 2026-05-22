@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
-    AggregatePlan, Assertion, CommitRequest, Engine, EngineOpen, EngineRecord, FieldSelection,
-    KeyRange, Mutation, QueryPlan, ReadOperator, RecordKey, RecursionMode, Retraction, RuleSetRef,
-    SnapshotId, TableDescriptor, TableName, UnificationPlan,
+    AggregatePlan, Assertion, CommitRequest, CommitSequence, Engine, EngineOpen, EngineRecord,
+    FieldSelection, KeyRange, Mutation, QueryPlan, ReadOperator, RecordKey, RecursionMode,
+    Retraction, RuleSetRef, SnapshotId, TableDescriptor, TableName, UnificationPlan,
 };
 use signal_sema::SemaOperation;
 use tempfile::TempDir;
@@ -74,6 +74,7 @@ fn engine_executes_assert_and_match_over_registered_record_family() {
 
     assert_eq!(receipt.operation(), SemaOperation::Assert);
     assert_eq!(receipt.table().as_str(), "toy_records");
+    assert_eq!(receipt.commit_sequence(), CommitSequence::new(1));
     assert_eq!(receipt.snapshot(), SnapshotId::new(1));
     assert_eq!(tables.len(), 1);
     assert_eq!(tables[0].table_name(), "toy_records");
@@ -168,6 +169,7 @@ fn engine_executes_mutate_and_retract_over_existing_record_family() {
         .expect("match after mutate succeeds");
 
     assert_eq!(mutation.operation(), SemaOperation::Mutate);
+    assert_eq!(mutation.commit_sequence(), CommitSequence::new(2));
     assert_eq!(mutation.snapshot(), SnapshotId::new(2));
     assert_eq!(updated.records(), &[ToyRecord::new("alpha", "second")]);
 
@@ -180,6 +182,7 @@ fn engine_executes_mutate_and_retract_over_existing_record_family() {
     let log = engine.commit_log().expect("commit log reads");
 
     assert_eq!(retraction.operation(), SemaOperation::Retract);
+    assert_eq!(retraction.commit_sequence(), CommitSequence::new(3));
     assert_eq!(retraction.snapshot(), SnapshotId::new(3));
     assert!(removed.records().is_empty());
     assert_eq!(log.len(), 3);
@@ -272,6 +275,7 @@ fn commit_lands_write_bundle_under_one_snapshot() {
     let log = engine.commit_log().expect("commit log reads");
 
     assert_eq!(receipt.snapshot(), SnapshotId::new(3));
+    assert_eq!(receipt.commit_sequence(), CommitSequence::new(3));
     assert_eq!(receipt.operation_count(), 3);
     assert_eq!(
         snapshot.records(),

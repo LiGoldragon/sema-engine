@@ -6,9 +6,9 @@ use std::time::Duration;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
-    Assertion, CommitRequest, DeltaKind, Engine, EngineOpen, EngineRecord, Mutation, QueryPlan,
-    RecordKey, Retraction, SequenceRange, SinkError, SnapshotId, SubscriptionDeliveryMode,
-    SubscriptionEvent, SubscriptionSink, TableDescriptor, TableName,
+    Assertion, CommitRequest, CommitSequence, DeltaKind, Engine, EngineOpen, EngineRecord,
+    Mutation, QueryPlan, RecordKey, Retraction, SequenceRange, SinkError, SnapshotId,
+    SubscriptionDeliveryMode, SubscriptionEvent, SubscriptionSink, TableDescriptor, TableName,
 };
 use tempfile::TempDir;
 
@@ -537,6 +537,7 @@ fn commit_log_range_replays_from_snapshot_cursor() {
         .expect("commit log range reads");
 
     assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].commit_sequence(), CommitSequence::new(2));
     assert_eq!(replay[0].snapshot(), SnapshotId::new(2));
     assert_eq!(
         replay[0].operations().head().key().map(RecordKey::as_str),

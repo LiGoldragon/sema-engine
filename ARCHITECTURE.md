@@ -69,9 +69,15 @@ authorization, domain validation, and their own databases.
 - A multi-operation commit writes one `CommitLogEntry` containing
   `NonEmpty<CommitLogOperation>` in the same committed write transaction
   as the domain records.
+- Every committed write transaction advances a durable `CommitSequence`.
+  The sequence is a per-database high-water mark for version handover:
+  a next-version daemon can copy state at sequence N, then replay commits
+  from N+1 forward.
+- `replay_from_sequence` returns commit-log entries by `CommitSequence`.
 - `commit_log_range` returns bounded replay entries by `SnapshotId`.
-- `CommitReceipt` carries the committed `SnapshotId` and operation count.
-  Single-operation and multi-operation commits return the same receipt shape.
+- `CommitReceipt` carries the committed `CommitSequence`, `SnapshotId`, and
+  operation count. Single-operation and multi-operation commits return the
+  same receipt shape.
 - `QuerySnapshot` carries the latest observed `SnapshotId`.
 - `ValidationReceipt` carries the observed `SnapshotId` and record count.
 - `Validate` does not write commit-log entries.

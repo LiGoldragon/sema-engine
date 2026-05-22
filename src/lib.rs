@@ -12,6 +12,7 @@ pub mod log;
 pub mod mutation;
 pub mod query;
 pub mod record;
+pub mod sequence;
 pub mod snapshot;
 pub mod subscribe;
 pub mod table;
@@ -29,6 +30,7 @@ pub use query::{
     ValidationReceipt,
 };
 pub use record::{EngineRecord, EngineStoredRecord, RecordKey};
+pub use sequence::CommitSequence;
 pub use snapshot::SnapshotId;
 pub use subscribe::{
     DeltaKind, InitialSnapshot, SequenceRange, SinkError, SubscriptionDeliveryFailure,

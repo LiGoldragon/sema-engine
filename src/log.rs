@@ -2,7 +2,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use signal_core::NonEmpty;
 use signal_sema::SemaOperation;
 
-use crate::{RecordKey, SnapshotId, TableName};
+use crate::{CommitSequence, RecordKey, SnapshotId, TableName};
 
 /// Durable record of one commit: a request that committed all its
 /// write effects (or none) under a single [`SnapshotId`]. A single-operation
@@ -13,23 +13,38 @@ use crate::{RecordKey, SnapshotId, TableName};
 /// structural via the NonEmpty operations list.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CommitLogEntry {
+    commit_sequence: CommitSequence,
     snapshot: SnapshotId,
     operations: NonEmpty<CommitLogOperation>,
 }
 
 impl CommitLogEntry {
-    pub fn new(snapshot: SnapshotId, operations: NonEmpty<CommitLogOperation>) -> Self {
+    pub fn new(
+        commit_sequence: CommitSequence,
+        snapshot: SnapshotId,
+        operations: NonEmpty<CommitLogOperation>,
+    ) -> Self {
         Self {
+            commit_sequence,
             snapshot,
             operations,
         }
     }
 
-    pub fn single(snapshot: SnapshotId, operation: CommitLogOperation) -> Self {
+    pub fn single(
+        commit_sequence: CommitSequence,
+        snapshot: SnapshotId,
+        operation: CommitLogOperation,
+    ) -> Self {
         Self {
+            commit_sequence,
             snapshot,
             operations: NonEmpty::single(operation),
         }
+    }
+
+    pub fn commit_sequence(&self) -> CommitSequence {
+        self.commit_sequence
     }
 
     pub fn snapshot(&self) -> SnapshotId {

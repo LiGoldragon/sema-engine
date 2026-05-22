@@ -1,6 +1,6 @@
 use signal_sema::SemaOperation;
 
-use crate::{EngineRecord, RecordKey, SnapshotId, TableName, TableReference};
+use crate::{CommitSequence, EngineRecord, RecordKey, SnapshotId, TableName, TableReference};
 
 #[derive(Debug, Clone)]
 pub struct Assertion<RecordValue> {
@@ -27,6 +27,7 @@ pub struct MutationReceipt {
     operation: SemaOperation,
     table: TableName,
     key: RecordKey,
+    commit_sequence: CommitSequence,
     snapshot: SnapshotId,
 }
 
@@ -35,12 +36,14 @@ impl MutationReceipt {
         operation: SemaOperation,
         table: TableName,
         key: RecordKey,
+        commit_sequence: CommitSequence,
         snapshot: SnapshotId,
     ) -> Self {
         Self {
             operation,
             table,
             key,
+            commit_sequence,
             snapshot,
         }
     }
@@ -55,6 +58,10 @@ impl MutationReceipt {
 
     pub fn key(&self) -> &RecordKey {
         &self.key
+    }
+
+    pub fn commit_sequence(&self) -> CommitSequence {
+        self.commit_sequence
     }
 
     pub fn snapshot(&self) -> SnapshotId {
@@ -192,14 +199,21 @@ impl<RecordValue> WriteOperation<RecordValue> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitReceipt {
     table: TableName,
+    commit_sequence: CommitSequence,
     snapshot: SnapshotId,
     operation_count: usize,
 }
 
 impl CommitReceipt {
-    pub fn new(table: TableName, snapshot: SnapshotId, operation_count: usize) -> Self {
+    pub fn new(
+        table: TableName,
+        commit_sequence: CommitSequence,
+        snapshot: SnapshotId,
+        operation_count: usize,
+    ) -> Self {
         Self {
             table,
+            commit_sequence,
             snapshot,
             operation_count,
         }
@@ -207,6 +221,10 @@ impl CommitReceipt {
 
     pub fn table(&self) -> &TableName {
         &self.table
+    }
+
+    pub fn commit_sequence(&self) -> CommitSequence {
+        self.commit_sequence
     }
 
     pub fn snapshot(&self) -> SnapshotId {

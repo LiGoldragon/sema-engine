@@ -23,6 +23,7 @@ use crate::{
 const CATALOG: sema::Table<&'static str, TableRegistration> =
     sema::Table::new("__sema_engine_catalog");
 const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
+const LATEST_COMMIT_SEQUENCE_KEY: &str = "latest_commit_sequence";
 const LATEST_SNAPSHOT_KEY: &str = "latest_snapshot";
 const NEXT_SUBSCRIPTION_KEY: &str = "next_subscription";
 const COMMIT_LOG: sema::Table<u64, CommitLogEntry> = sema::Table::new("__sema_engine_commit_log");
@@ -93,8 +94,10 @@ impl Engine {
         }
 
         let record = assertion.record().clone();
+        let commit_sequence = self.next_commit_sequence()?;
         let snapshot = self.next_snapshot()?;
         let entry = CommitLogEntry::single(
+            commit_sequence,
             snapshot,
             CommitLogOperation::new(
                 SemaOperation::Assert,
@@ -108,7 +111,12 @@ impl Engine {
                 key.to_owned_string(),
                 assertion.record(),
             )?;
-            COMMIT_LOG.insert(transaction, snapshot.value(), &entry)?;
+            COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+            COUNTERS.insert(
+                transaction,
+                LATEST_COMMIT_SEQUENCE_KEY,
+                &commit_sequence.value(),
+            )?;
             COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
             Ok(())
         })?;
@@ -124,6 +132,7 @@ impl Engine {
             SemaOperation::Assert,
             *assertion.table().name(),
             key,
+            commit_sequence,
             snapshot,
         ))
     }
@@ -156,8 +165,10 @@ impl Engine {
         }
 
         let record = mutation.record().clone();
+        let commit_sequence = self.next_commit_sequence()?;
         let snapshot = self.next_snapshot()?;
         let entry = CommitLogEntry::single(
+            commit_sequence,
             snapshot,
             CommitLogOperation::new(
                 SemaOperation::Mutate,
@@ -171,7 +182,12 @@ impl Engine {
                 key.to_owned_string(),
                 mutation.record(),
             )?;
-            COMMIT_LOG.insert(transaction, snapshot.value(), &entry)?;
+            COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+            COUNTERS.insert(
+                transaction,
+                LATEST_COMMIT_SEQUENCE_KEY,
+                &commit_sequence.value(),
+            )?;
             COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
             Ok(())
         })?;
@@ -187,6 +203,7 @@ impl Engine {
             SemaOperation::Mutate,
             *mutation.table().name(),
             key,
+            commit_sequence,
             snapshot,
         ))
     }
@@ -215,8 +232,10 @@ impl Engine {
         };
 
         let key = retraction.key().clone();
+        let commit_sequence = self.next_commit_sequence()?;
         let snapshot = self.next_snapshot()?;
         let entry = CommitLogEntry::single(
+            commit_sequence,
             snapshot,
             CommitLogOperation::new(
                 SemaOperation::Retract,
@@ -230,7 +249,12 @@ impl Engine {
                 .sema_table()
                 .remove(transaction, key.to_owned_string())?;
             if removed {
-                COMMIT_LOG.insert(transaction, snapshot.value(), &entry)?;
+                COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+                COUNTERS.insert(
+                    transaction,
+                    LATEST_COMMIT_SEQUENCE_KEY,
+                    &commit_sequence.value(),
+                )?;
                 COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
             }
             Ok(removed)
@@ -250,6 +274,7 @@ impl Engine {
             SemaOperation::Retract,
             *retraction.table().name(),
             key,
+            commit_sequence,
             snapshot,
         ))
     }
@@ -355,8 +380,10 @@ impl Engine {
             }
         }
 
+        let commit_sequence = self.next_commit_sequence()?;
         let snapshot = self.next_snapshot()?;
         let entry = CommitLogEntry::new(
+            commit_sequence,
             snapshot,
             NonEmpty::try_from_vec(log_operations).map_err(|_| Error::EmptyCommit {
                 table: request.table().name().as_str().to_owned(),
@@ -380,7 +407,12 @@ impl Engine {
                     }
                 }
             }
-            COMMIT_LOG.insert(transaction, snapshot.value(), &entry)?;
+            COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+            COUNTERS.insert(
+                transaction,
+                LATEST_COMMIT_SEQUENCE_KEY,
+                &commit_sequence.value(),
+            )?;
             COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
             Ok(())
         })?;
@@ -397,6 +429,7 @@ impl Engine {
 
         Ok(crate::CommitReceipt::new(
             *request.table().name(),
+            commit_sequence,
             snapshot,
             request.operation_count(),
         ))
@@ -495,12 +528,33 @@ impl Engine {
         Ok(value)
     }
 
+    pub fn current_commit_sequence(&self) -> Result<crate::CommitSequence> {
+        let value = self.storage.read(|transaction| {
+            Ok(COUNTERS
+                .get(transaction, LATEST_COMMIT_SEQUENCE_KEY)?
+                .map(crate::CommitSequence::new)
+                .unwrap_or_else(crate::CommitSequence::genesis))
+        })?;
+        Ok(value)
+    }
+
     pub fn commit_log(&self) -> Result<Vec<CommitLogEntry>> {
         Ok(self
             .storage
             .read(|transaction| COMMIT_LOG.iter(transaction))?
             .into_iter()
             .map(|(_sequence, entry)| entry)
+            .collect())
+    }
+
+    pub fn replay_from_sequence(
+        &self,
+        start: crate::CommitSequence,
+    ) -> Result<Vec<CommitLogEntry>> {
+        Ok(self
+            .commit_log()?
+            .into_iter()
+            .filter(|entry| entry.commit_sequence() >= start)
             .collect())
     }
 
@@ -564,6 +618,10 @@ impl Engine {
 
     fn next_snapshot(&self) -> Result<SnapshotId> {
         Ok(self.latest_snapshot()?.next())
+    }
+
+    fn next_commit_sequence(&self) -> Result<crate::CommitSequence> {
+        Ok(self.current_commit_sequence()?.next())
     }
 
     fn ensure_registered<RecordValue>(&self, table: &TableReference<RecordValue>) -> Result<()> {
