@@ -16,7 +16,7 @@ use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
     Catalog, CommitRequest, DeltaKind, EngineStoredRecord, Error, InitialSnapshot, QueryPlan,
     QuerySnapshot, Result, Retraction, SequenceRange, SnapshotIdentifier, SubscriptionHandle,
-    SubscriptionId, SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink,
+    SubscriptionIdentifier, SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink,
     TableDescriptor, TableReference, TableRegistration, WriteOperation,
 };
 
@@ -675,8 +675,8 @@ impl Engine {
         let id = self.storage.read(|transaction| {
             Ok(COUNTERS
                 .get(transaction, NEXT_SUBSCRIPTION_KEY)?
-                .map(SubscriptionId::new)
-                .unwrap_or_else(SubscriptionId::first))
+                .map(SubscriptionIdentifier::new)
+                .unwrap_or_else(SubscriptionIdentifier::first))
         })?;
         Ok(SubscriptionHandle::new(id, *plan.table().name(), snapshot))
     }

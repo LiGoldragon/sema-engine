@@ -35,6 +35,6 @@ pub use snapshot::SnapshotIdentifier;
 pub use subscribe::{
     DeltaKind, InitialSnapshot, SequenceRange, SinkError, SubscriptionDeliveryFailure,
     SubscriptionDeliveryMode, SubscriptionDelta, SubscriptionEvent, SubscriptionHandle,
-    SubscriptionId, SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink,
+    SubscriptionIdentifier, SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink,
 };
 pub use table::{TableDescriptor, TableName, TableReference};

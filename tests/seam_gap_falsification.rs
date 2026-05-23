@@ -22,8 +22,8 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
     Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, SinkError,
-    SnapshotIdentifier, SubscriptionEvent, SubscriptionId, SubscriptionSink, TableDescriptor,
-    TableName,
+    SnapshotIdentifier, SubscriptionEvent, SubscriptionIdentifier, SubscriptionSink,
+    TableDescriptor, TableName,
 };
 use tempfile::TempDir;
 
@@ -229,7 +229,7 @@ enum DryRunFailure {
 // daemon shutdown drops the engine and reclaims everything.
 
 struct SupervisorBackedSink {
-    active: Arc<Mutex<HashSet<SubscriptionId>>>,
+    active: Arc<Mutex<HashSet<SubscriptionIdentifier>>>,
     received: Arc<AtomicUsize>,
     dropped: Arc<AtomicUsize>,
 }
@@ -261,7 +261,8 @@ fn subscription_lifetime_can_be_managed_externally_via_handle_id_filter() {
         .register_table(fixture.thought_descriptor())
         .expect("table registers");
 
-    let supervisor: Arc<Mutex<HashSet<SubscriptionId>>> = Arc::new(Mutex::new(HashSet::new()));
+    let supervisor: Arc<Mutex<HashSet<SubscriptionIdentifier>>> =
+        Arc::new(Mutex::new(HashSet::new()));
     let received = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicUsize::new(0));
     let sink: Arc<dyn SubscriptionSink<Thought>> = Arc::new(SupervisorBackedSink {

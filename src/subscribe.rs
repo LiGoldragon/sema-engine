@@ -20,9 +20,9 @@ use crate::{QueryFilter, QueryPlan, QuerySnapshot, RecordKey, SnapshotIdentifier
     Hash,
 )]
 #[rkyv(derive(Debug))]
-pub struct SubscriptionId(u64);
+pub struct SubscriptionIdentifier(u64);
 
-impl SubscriptionId {
+impl SubscriptionIdentifier {
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
@@ -42,13 +42,13 @@ impl SubscriptionId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubscriptionHandle {
-    id: SubscriptionId,
+    id: SubscriptionIdentifier,
     table: TableName,
     snapshot: SnapshotIdentifier,
 }
 
 impl SubscriptionHandle {
-    pub fn new(id: SubscriptionId, table: TableName, snapshot: SnapshotIdentifier) -> Self {
+    pub fn new(id: SubscriptionIdentifier, table: TableName, snapshot: SnapshotIdentifier) -> Self {
         Self {
             id,
             table,
@@ -56,7 +56,7 @@ impl SubscriptionHandle {
         }
     }
 
-    pub fn id(&self) -> SubscriptionId {
+    pub fn id(&self) -> SubscriptionIdentifier {
         self.id
     }
 
@@ -72,7 +72,7 @@ impl SubscriptionHandle {
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 #[rkyv(derive(Debug))]
 pub struct SubscriptionRegistration {
-    id: SubscriptionId,
+    id: SubscriptionIdentifier,
     table_name: String,
     filter: QueryFilter,
     snapshot: SnapshotIdentifier,
@@ -88,7 +88,7 @@ impl SubscriptionRegistration {
         }
     }
 
-    pub fn id(&self) -> SubscriptionId {
+    pub fn id(&self) -> SubscriptionIdentifier {
         self.id
     }
 
