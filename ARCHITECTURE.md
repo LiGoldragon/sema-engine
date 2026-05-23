@@ -106,7 +106,7 @@ authorization, domain validation, and their own databases.
 ```mermaid
 flowchart TD
     signal_sema["signal-sema<br/>SemaOperation"]
-    signal_core["signal-core<br/>NonEmpty utility today"]
+    signal_frame["signal-frame<br/>NonEmpty utility today"]
     sema["sema<br/>storage kernel"]
     engine["sema-engine<br/>database operation execution"]
     component["component daemon<br/>Kameo actor tree"]
@@ -114,7 +114,7 @@ flowchart TD
 
     engine --> sema
     engine --> signal_sema
-    engine --> signal_core
+    engine --> signal_frame
     component --> engine
     sema --> database
 ```
@@ -189,10 +189,38 @@ subscription replay through the existing snapshot cursor;
 `CommitSequence` is the boundary for cross-daemon handover. Both are
 durable, monotonic, and per-database.
 
+## Handover raw-payload storage discipline
+
+`signal-version-handover`'s `Mirror` operation carries an unspecified
+raw payload (raw bytes plus a `RecordKind` discriminant). When a
+component daemon receives a mirrored write during the handover window
+those raw bytes do **not** enter the sema-engine-managed typed tables
+directly. The receiver persists them in a **separate raw-payload
+container** outside the typed database — the engine's typed tables
+only ever accept records produced by `version-projection`'s
+reverse-projection step.
+
+This keeps the typed database invariant intact: every record in
+sema-engine's tables has gone through a typed shape known to the
+receiver's signal-X library. Un-incorporated handover bytes live
+beside the typed database, never inside it. Non-representable
+payloads become typed `Divergence` operations on the handover wire,
+again never silently landing as raw rows.
+
+The container itself is the receiver daemon's responsibility — this
+crate owns neither the container's on-disk shape nor its lifetime.
+The discipline is the load-bearing rule: typed tables stay clean.
+The typed-enum alternative for the `Mirror` payload is deferred per
+`signal-version-handover/ARCHITECTURE.md` (Possible features), so the
+raw-container discipline is the durable answer for the first
+production handover.
+
 ## Non-Goals
 
 - No schema-less storage open.
-- No raw byte slot store.
+- No raw byte slot store. (Handover raw payloads live in a separate
+  container outside this engine's typed tables — see the section
+  above.)
 - No second redb handle for a component database already opened by
   `Engine`.
 - No actors in this crate.
