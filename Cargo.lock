@@ -236,7 +236,7 @@ dependencies = [
 [[package]]
 name = "nota-codec"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/nota-codec.git?branch=main#c861cee597180b9ae707b6bac036695d6f926b5a"
+source = "git+https://github.com/LiGoldragon/nota-codec.git?branch=main#538555e895529e2884b7d37d20c66aadc2a49c08"
 dependencies = [
  "camino",
  "nota-derive",
