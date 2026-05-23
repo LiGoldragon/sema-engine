@@ -15,7 +15,7 @@ use crate::log::{CommitLogEntry, CommitLogOperation};
 use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
     Catalog, CommitRequest, DeltaKind, EngineStoredRecord, Error, InitialSnapshot, QueryPlan,
-    QuerySnapshot, Result, Retraction, SequenceRange, SnapshotId, SubscriptionHandle,
+    QuerySnapshot, Result, Retraction, SequenceRange, SnapshotIdentifier, SubscriptionHandle,
     SubscriptionId, SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink,
     TableDescriptor, TableReference, TableRegistration, WriteOperation,
 };
@@ -518,12 +518,12 @@ impl Engine {
         ))
     }
 
-    pub fn latest_snapshot(&self) -> Result<SnapshotId> {
+    pub fn latest_snapshot(&self) -> Result<SnapshotIdentifier> {
         let value = self.storage.read(|transaction| {
             Ok(COUNTERS
                 .get(transaction, LATEST_SNAPSHOT_KEY)?
-                .map(SnapshotId::new)
-                .unwrap_or_else(SnapshotId::genesis))
+                .map(SnapshotIdentifier::new)
+                .unwrap_or_else(SnapshotIdentifier::genesis))
         })?;
         Ok(value)
     }
@@ -616,7 +616,7 @@ impl Engine {
         &self.storage
     }
 
-    fn next_snapshot(&self) -> Result<SnapshotId> {
+    fn next_snapshot(&self) -> Result<SnapshotIdentifier> {
         Ok(self.latest_snapshot()?.next())
     }
 
@@ -670,7 +670,7 @@ impl Engine {
     fn next_subscription_handle<RecordValue>(
         &self,
         plan: &QueryPlan<RecordValue>,
-        snapshot: SnapshotId,
+        snapshot: SnapshotIdentifier,
     ) -> Result<SubscriptionHandle> {
         let id = self.storage.read(|transaction| {
             Ok(COUNTERS

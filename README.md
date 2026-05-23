@@ -12,7 +12,7 @@ SignalVerb roots `Assert`, `Mutate`, `Retract`, `Match`, `Subscribe`,
 `Validate`. Multi-operation atomicity is structural — `Engine::commit`
 takes a typed `CommitRequest<RecordValue>` (a non-empty sequence of
 `WriteOperation`s for one registered table) and lands it under a single
-`SnapshotId` with one `CommitLogEntry`. Typed `ReadPlan` vocabulary,
+`SnapshotIdentifier` with one `CommitLogEntry`. Typed `ReadPlan` vocabulary,
 operation-log replay, `list_tables`, and the first `Subscribe` primitive
 (durable registration, initial snapshot, post-commit delta delivery) are
 also implemented. Executable read plans cover all rows, exact key, and

@@ -31,7 +31,7 @@ pub use query::{
 };
 pub use record::{EngineRecord, EngineStoredRecord, RecordKey};
 pub use sequence::CommitSequence;
-pub use snapshot::SnapshotId;
+pub use snapshot::SnapshotIdentifier;
 pub use subscribe::{
     DeltaKind, InitialSnapshot, SequenceRange, SinkError, SubscriptionDeliveryFailure,
     SubscriptionDeliveryMode, SubscriptionDelta, SubscriptionEvent, SubscriptionHandle,

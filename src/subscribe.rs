@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use signal_sema::SemaOperation;
 
-use crate::{QueryFilter, QueryPlan, QuerySnapshot, RecordKey, SnapshotId, TableName};
+use crate::{QueryFilter, QueryPlan, QuerySnapshot, RecordKey, SnapshotIdentifier, TableName};
 
 #[derive(
     Archive,
@@ -44,11 +44,11 @@ impl SubscriptionId {
 pub struct SubscriptionHandle {
     id: SubscriptionId,
     table: TableName,
-    snapshot: SnapshotId,
+    snapshot: SnapshotIdentifier,
 }
 
 impl SubscriptionHandle {
-    pub fn new(id: SubscriptionId, table: TableName, snapshot: SnapshotId) -> Self {
+    pub fn new(id: SubscriptionId, table: TableName, snapshot: SnapshotIdentifier) -> Self {
         Self {
             id,
             table,
@@ -64,7 +64,7 @@ impl SubscriptionHandle {
         &self.table
     }
 
-    pub fn snapshot(&self) -> SnapshotId {
+    pub fn snapshot(&self) -> SnapshotIdentifier {
         self.snapshot
     }
 }
@@ -75,7 +75,7 @@ pub struct SubscriptionRegistration {
     id: SubscriptionId,
     table_name: String,
     filter: QueryFilter,
-    snapshot: SnapshotId,
+    snapshot: SnapshotIdentifier,
 }
 
 impl SubscriptionRegistration {
@@ -100,7 +100,7 @@ impl SubscriptionRegistration {
         &self.filter
     }
 
-    pub fn snapshot(&self) -> SnapshotId {
+    pub fn snapshot(&self) -> SnapshotIdentifier {
         self.snapshot
     }
 }
@@ -157,7 +157,7 @@ pub struct SubscriptionDelta<RecordValue> {
     kind: DeltaKind,
     table: TableName,
     key: RecordKey,
-    snapshot: SnapshotId,
+    snapshot: SnapshotIdentifier,
     record: RecordValue,
 }
 
@@ -167,7 +167,7 @@ impl<RecordValue> SubscriptionDelta<RecordValue> {
         kind: DeltaKind,
         table: TableName,
         key: RecordKey,
-        snapshot: SnapshotId,
+        snapshot: SnapshotIdentifier,
         record: RecordValue,
     ) -> Self {
         Self {
@@ -196,7 +196,7 @@ impl<RecordValue> SubscriptionDelta<RecordValue> {
         &self.key
     }
 
-    pub fn snapshot(&self) -> SnapshotId {
+    pub fn snapshot(&self) -> SnapshotIdentifier {
         self.snapshot
     }
 
@@ -281,23 +281,23 @@ pub trait SubscriptionSink<RecordValue>: Send + Sync {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SequenceRange {
-    start: SnapshotId,
-    end: Option<SnapshotId>,
+    start: SnapshotIdentifier,
+    end: Option<SnapshotIdentifier>,
 }
 
 impl SequenceRange {
-    pub fn from(start: SnapshotId) -> Self {
+    pub fn from(start: SnapshotIdentifier) -> Self {
         Self { start, end: None }
     }
 
-    pub fn between(start: SnapshotId, end: SnapshotId) -> Self {
+    pub fn between(start: SnapshotIdentifier, end: SnapshotIdentifier) -> Self {
         Self {
             start,
             end: Some(end),
         }
     }
 
-    pub fn contains(&self, snapshot: SnapshotId) -> bool {
+    pub fn contains(&self, snapshot: SnapshotIdentifier) -> bool {
         snapshot >= self.start && self.end.is_none_or(|end| snapshot <= end)
     }
 }
@@ -332,7 +332,7 @@ impl SubscriptionRegistry {
         kind: DeltaKind,
         table: TableName,
         key: &RecordKey,
-        snapshot: SnapshotId,
+        snapshot: SnapshotIdentifier,
         record: &RecordValue,
     ) -> crate::Result<()>
     where
@@ -377,7 +377,7 @@ trait ErasedSubscription: Send + Sync {
         kind: DeltaKind,
         table: TableName,
         key: &RecordKey,
-        snapshot: SnapshotId,
+        snapshot: SnapshotIdentifier,
         record: &dyn Any,
     );
 }
@@ -391,7 +391,7 @@ where
         kind: DeltaKind,
         table: TableName,
         key: &RecordKey,
-        snapshot: SnapshotId,
+        snapshot: SnapshotIdentifier,
         record: &dyn Any,
     ) {
         if *self.plan.table().name() != table || !self.matches(key) {

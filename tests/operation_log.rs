@@ -4,7 +4,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
     Assertion, CommitRequest, CommitSequence, Engine, EngineOpen, EngineRecord, QueryPlan,
-    RecordKey, SnapshotId, TableDescriptor, TableName,
+    RecordKey, SnapshotIdentifier, TableDescriptor, TableName,
 };
 use signal_sema::SemaOperation;
 use tempfile::TempDir;
@@ -67,12 +67,12 @@ fn assert_writes_commit_log_entry_with_committed_snapshot() {
         .assert(Assertion::new(records, LoggedRecord::new("alpha", "first")))
         .expect("assert succeeds");
 
-    assert_eq!(receipt.snapshot(), SnapshotId::new(1));
+    assert_eq!(receipt.snapshot(), SnapshotIdentifier::new(1));
     let log = engine.commit_log().expect("commit log reads");
     assert_eq!(log.len(), 1);
     assert_eq!(receipt.commit_sequence(), CommitSequence::new(1));
     assert_eq!(log[0].commit_sequence(), CommitSequence::new(1));
-    assert_eq!(log[0].snapshot(), SnapshotId::new(1));
+    assert_eq!(log[0].snapshot(), SnapshotIdentifier::new(1));
     let head = log[0].operations().head();
     assert_eq!(head.operation(), SemaOperation::Assert);
     assert_eq!(head.table_name(), "logged_records");
@@ -104,7 +104,7 @@ fn commit_log_and_snapshot_cursor_survive_reopen() {
         .expect("match succeeds");
     let log = reopened.commit_log().expect("commit log reads");
 
-    assert_eq!(snapshot.snapshot(), SnapshotId::new(2));
+    assert_eq!(snapshot.snapshot(), SnapshotIdentifier::new(2));
     assert_eq!(snapshot.records().len(), 2);
     assert_eq!(
         reopened.current_commit_sequence().unwrap(),
@@ -112,18 +112,21 @@ fn commit_log_and_snapshot_cursor_survive_reopen() {
     );
     assert_eq!(log.len(), 2);
     assert_eq!(log[0].commit_sequence(), CommitSequence::new(1));
-    assert_eq!(log[0].snapshot(), SnapshotId::new(1));
+    assert_eq!(log[0].snapshot(), SnapshotIdentifier::new(1));
     assert_eq!(
         log[0].operations().head().operation(),
         SemaOperation::Assert
     );
     assert_eq!(log[1].commit_sequence(), CommitSequence::new(2));
-    assert_eq!(log[1].snapshot(), SnapshotId::new(2));
+    assert_eq!(log[1].snapshot(), SnapshotIdentifier::new(2));
     assert_eq!(
         log[1].operations().head().operation(),
         SemaOperation::Assert
     );
-    assert_eq!(reopened.latest_snapshot().unwrap(), SnapshotId::new(2));
+    assert_eq!(
+        reopened.latest_snapshot().unwrap(),
+        SnapshotIdentifier::new(2)
+    );
 }
 
 #[test]
@@ -151,7 +154,7 @@ fn replay_from_sequence_uses_durable_commit_sequence_cursor() {
 
     assert_eq!(replay.len(), 1);
     assert_eq!(replay[0].commit_sequence(), CommitSequence::new(2));
-    assert_eq!(replay[0].snapshot(), SnapshotId::new(2));
+    assert_eq!(replay[0].snapshot(), SnapshotIdentifier::new(2));
     assert_eq!(
         replay[0].operations().head().key().map(RecordKey::as_str),
         Some("beta")

@@ -4,7 +4,7 @@ use signal_sema::SemaOperation;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
-use crate::{RecordKey, SnapshotId, TableName, TableReference};
+use crate::{RecordKey, SnapshotIdentifier, TableName, TableReference};
 
 #[derive(Debug, Clone)]
 pub struct QueryPlan<RecordValue> {
@@ -385,7 +385,7 @@ impl RecursionMode {
 pub struct QuerySnapshot<RecordValue> {
     operation: SemaOperation,
     table: TableName,
-    snapshot: SnapshotId,
+    snapshot: SnapshotIdentifier,
     records: Vec<RecordValue>,
 }
 
@@ -393,7 +393,7 @@ impl<RecordValue> QuerySnapshot<RecordValue> {
     pub fn new(
         operation: SemaOperation,
         table: TableName,
-        snapshot: SnapshotId,
+        snapshot: SnapshotIdentifier,
         records: Vec<RecordValue>,
     ) -> Self {
         Self {
@@ -412,7 +412,7 @@ impl<RecordValue> QuerySnapshot<RecordValue> {
         &self.table
     }
 
-    pub fn snapshot(&self) -> SnapshotId {
+    pub fn snapshot(&self) -> SnapshotIdentifier {
         self.snapshot
     }
 
@@ -425,7 +425,7 @@ impl<RecordValue> QuerySnapshot<RecordValue> {
 pub struct ValidationReceipt {
     operation: SemaOperation,
     table: TableName,
-    snapshot: SnapshotId,
+    snapshot: SnapshotIdentifier,
     record_count: usize,
 }
 
@@ -433,7 +433,7 @@ impl ValidationReceipt {
     pub fn new(
         operation: SemaOperation,
         table: TableName,
-        snapshot: SnapshotId,
+        snapshot: SnapshotIdentifier,
         record_count: usize,
     ) -> Self {
         Self {
@@ -452,7 +452,7 @@ impl ValidationReceipt {
         &self.table
     }
 
-    pub fn snapshot(&self) -> SnapshotId {
+    pub fn snapshot(&self) -> SnapshotIdentifier {
         self.snapshot
     }
 

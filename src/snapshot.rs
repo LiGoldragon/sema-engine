@@ -14,9 +14,9 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
     Hash,
 )]
 #[rkyv(derive(Debug))]
-pub struct SnapshotId(u64);
+pub struct SnapshotIdentifier(u64);
 
-impl SnapshotId {
+impl SnapshotIdentifier {
     pub const fn new(value: u64) -> Self {
         Self(value)
     }

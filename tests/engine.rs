@@ -5,7 +5,7 @@ use sema::SchemaVersion;
 use sema_engine::{
     AggregatePlan, Assertion, CommitRequest, CommitSequence, Engine, EngineOpen, EngineRecord,
     FieldSelection, KeyRange, Mutation, QueryPlan, ReadOperator, RecordKey, RecursionMode,
-    Retraction, RuleSetRef, SnapshotId, TableDescriptor, TableName, UnificationPlan,
+    Retraction, RuleSetRef, SnapshotIdentifier, TableDescriptor, TableName, UnificationPlan,
 };
 use signal_sema::SemaOperation;
 use tempfile::TempDir;
@@ -75,7 +75,7 @@ fn engine_executes_assert_and_match_over_registered_record_family() {
     assert_eq!(receipt.operation(), SemaOperation::Assert);
     assert_eq!(receipt.table().as_str(), "toy_records");
     assert_eq!(receipt.commit_sequence(), CommitSequence::new(1));
-    assert_eq!(receipt.snapshot(), SnapshotId::new(1));
+    assert_eq!(receipt.snapshot(), SnapshotIdentifier::new(1));
     assert_eq!(tables.len(), 1);
     assert_eq!(tables[0].table_name(), "toy_records");
 
@@ -84,7 +84,7 @@ fn engine_executes_assert_and_match_over_registered_record_family() {
         .expect("match succeeds");
 
     assert_eq!(snapshot.operation(), SemaOperation::Match);
-    assert_eq!(snapshot.snapshot(), SnapshotId::new(1));
+    assert_eq!(snapshot.snapshot(), SnapshotIdentifier::new(1));
     assert_eq!(
         snapshot.records(),
         &[ToyRecord::new("first", "stored through engine")]
@@ -170,7 +170,7 @@ fn engine_executes_mutate_and_retract_over_existing_record_family() {
 
     assert_eq!(mutation.operation(), SemaOperation::Mutate);
     assert_eq!(mutation.commit_sequence(), CommitSequence::new(2));
-    assert_eq!(mutation.snapshot(), SnapshotId::new(2));
+    assert_eq!(mutation.snapshot(), SnapshotIdentifier::new(2));
     assert_eq!(updated.records(), &[ToyRecord::new("alpha", "second")]);
 
     let retraction = engine
@@ -183,7 +183,7 @@ fn engine_executes_mutate_and_retract_over_existing_record_family() {
 
     assert_eq!(retraction.operation(), SemaOperation::Retract);
     assert_eq!(retraction.commit_sequence(), CommitSequence::new(3));
-    assert_eq!(retraction.snapshot(), SnapshotId::new(3));
+    assert_eq!(retraction.snapshot(), SnapshotIdentifier::new(3));
     assert!(removed.records().is_empty());
     assert_eq!(log.len(), 3);
     assert_eq!(
@@ -219,7 +219,7 @@ fn validate_dry_run_returns_validate_receipt_without_commit_log_write() {
 
     assert_eq!(receipt.operation(), SemaOperation::Validate);
     assert_eq!(receipt.table().as_str(), "toy_records");
-    assert_eq!(receipt.snapshot(), SnapshotId::new(1));
+    assert_eq!(receipt.snapshot(), SnapshotIdentifier::new(1));
     assert_eq!(receipt.record_count(), 1);
     assert_eq!(log_after, log_before);
 }
@@ -274,7 +274,7 @@ fn commit_lands_write_bundle_under_one_snapshot() {
         .expect("match succeeds");
     let log = engine.commit_log().expect("commit log reads");
 
-    assert_eq!(receipt.snapshot(), SnapshotId::new(3));
+    assert_eq!(receipt.snapshot(), SnapshotIdentifier::new(3));
     assert_eq!(receipt.commit_sequence(), CommitSequence::new(3));
     assert_eq!(receipt.operation_count(), 3);
     assert_eq!(
@@ -286,7 +286,7 @@ fn commit_lands_write_bundle_under_one_snapshot() {
     );
     assert_eq!(log.len(), 3);
     let multi = &log[2];
-    assert_eq!(multi.snapshot(), SnapshotId::new(3));
+    assert_eq!(multi.snapshot(), SnapshotIdentifier::new(3));
     assert_eq!(multi.operation_count(), 3);
     let operations = multi.operations();
     assert_eq!(operations.head().operation(), SemaOperation::Assert);
@@ -316,7 +316,10 @@ fn commit_missing_record_rolls_back_entire_bundle() {
     assert!(matches!(error, sema_engine::Error::RecordNotFound { .. }));
     assert!(snapshot.records().is_empty());
     assert!(engine.commit_log().expect("commit log reads").is_empty());
-    assert_eq!(engine.latest_snapshot().unwrap(), SnapshotId::genesis());
+    assert_eq!(
+        engine.latest_snapshot().unwrap(),
+        SnapshotIdentifier::genesis()
+    );
 }
 
 #[test]
@@ -367,7 +370,10 @@ fn commit_duplicate_keys_return_typed_error_before_writing() {
         log[0].operations().head().operation(),
         SemaOperation::Assert
     );
-    assert_eq!(engine.latest_snapshot().unwrap(), SnapshotId::new(1));
+    assert_eq!(
+        engine.latest_snapshot().unwrap(),
+        SnapshotIdentifier::new(1)
+    );
 }
 
 #[test]
@@ -428,7 +434,10 @@ fn assert_against_existing_key_returns_typed_duplicate_assert_error() {
         log[0].operations().head().operation(),
         SemaOperation::Assert
     );
-    assert_eq!(engine.latest_snapshot().unwrap(), SnapshotId::new(1));
+    assert_eq!(
+        engine.latest_snapshot().unwrap(),
+        SnapshotIdentifier::new(1)
+    );
 }
 
 #[test]
@@ -460,7 +469,10 @@ fn commit_assert_against_existing_key_rolls_back_entire_bundle() {
     ));
     assert_eq!(snapshot.records(), &[ToyRecord::new("alpha", "first")]);
     assert_eq!(log.len(), 1);
-    assert_eq!(engine.latest_snapshot().unwrap(), SnapshotId::new(1));
+    assert_eq!(
+        engine.latest_snapshot().unwrap(),
+        SnapshotIdentifier::new(1)
+    );
 }
 
 #[test]

@@ -21,8 +21,9 @@ use std::sync::{Arc, atomic::AtomicUsize, atomic::Ordering};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
-    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, SinkError, SnapshotId,
-    SubscriptionEvent, SubscriptionId, SubscriptionSink, TableDescriptor, TableName,
+    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, SinkError,
+    SnapshotIdentifier, SubscriptionEvent, SubscriptionId, SubscriptionSink, TableDescriptor,
+    TableName,
 };
 use tempfile::TempDir;
 
@@ -380,8 +381,8 @@ fn cross_table_writes_via_two_engine_commits_are_not_engine_atomic() {
     // full, schema mismatch, panic — the first commit is durable
     // and the second is not.
     let log = engine.commit_log().expect("commit log");
-    assert_eq!(log[0].snapshot(), SnapshotId::new(1));
-    assert_eq!(log[1].snapshot(), SnapshotId::new(2));
+    assert_eq!(log[0].snapshot(), SnapshotIdentifier::new(1));
+    assert_eq!(log[1].snapshot(), SnapshotIdentifier::new(2));
     assert_eq!(log[0].operations().head().table_name(), "thoughts");
     assert_eq!(log[1].operations().head().table_name(), "activities");
 
@@ -433,7 +434,7 @@ fn cross_table_writes_via_two_engine_commits_are_not_engine_atomic() {
 // ─── New observations from the falsification pass ────────
 
 #[test]
-fn read_after_write_is_two_engine_calls_with_monotonic_snapshot_ids() {
+fn read_after_write_is_two_engine_calls_with_monotonic_snapshot_identifiers() {
     // The wire's `Request<P>` allows mixing Assert + Match in
     // one bundle in principle (Subscribe is the only positional
     // constraint per `Request::check`). The engine doesn't

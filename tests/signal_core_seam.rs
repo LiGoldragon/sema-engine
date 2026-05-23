@@ -17,7 +17,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
     Assertion, CommitRequest, Engine, EngineOpen, EngineRecord, Mutation, QueryPlan, RecordKey,
-    Retraction, SnapshotId, TableDescriptor, TableName,
+    Retraction, SnapshotIdentifier, TableDescriptor, TableName,
 };
 use signal_core::{
     NonEmpty, Operation, Request, RequestPayload, RequestRejectionReason, SignalVerb,
@@ -107,7 +107,7 @@ fn dispatch_single(
     engine: &Engine,
     table: sema_engine::TableReference<Thought>,
     operation: &Operation<ThoughtRequest>,
-) -> SnapshotId {
+) -> SnapshotIdentifier {
     assert_eq!(
         operation.verb(),
         operation.payload().signal_verb(),
@@ -159,7 +159,7 @@ fn signal_core_assert_operation_lands_as_engine_assert_with_matching_operation()
 
     let snapshot = dispatch_single(&engine, table, operation);
 
-    assert_eq!(snapshot, SnapshotId::new(1));
+    assert_eq!(snapshot, SnapshotIdentifier::new(1));
     let log = engine.commit_log().expect("commit log reads");
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].snapshot(), snapshot);
@@ -186,7 +186,7 @@ fn signal_core_mutate_operation_lands_as_engine_mutate_with_matching_operation()
     let mutate_checked = mutate.into_checked().expect("legacy check passes");
     let snapshot = dispatch_single(&engine, table, mutate_checked.operations.head());
 
-    assert_eq!(snapshot, SnapshotId::new(2));
+    assert_eq!(snapshot, SnapshotIdentifier::new(2));
     let log = engine.commit_log().expect("commit log reads");
     assert_eq!(log.len(), 2);
     let mutate_entry = log
@@ -223,7 +223,7 @@ fn signal_core_retract_operation_lands_as_engine_retract_with_matching_operation
     let checked = retire.into_checked().expect("legacy check passes");
     let snapshot = dispatch_single(&engine, table, checked.operations.head());
 
-    assert_eq!(snapshot, SnapshotId::new(2));
+    assert_eq!(snapshot, SnapshotIdentifier::new(2));
     let log = engine.commit_log().expect("commit log reads");
     let retract_entry = log
         .iter()
@@ -312,7 +312,7 @@ fn signal_core_multi_operation_request_lands_as_one_commit_log_entry_with_ordere
         .expect("multi-operation commit succeeds");
 
     assert_eq!(receipt.operation_count(), 3);
-    assert_eq!(receipt.snapshot(), SnapshotId::new(3));
+    assert_eq!(receipt.snapshot(), SnapshotIdentifier::new(3));
 
     let log = engine.commit_log().expect("commit log reads");
     assert_eq!(
@@ -391,7 +391,7 @@ fn signal_core_match_operation_lands_as_engine_match_with_matching_operation() {
 
     // Match observes the latest committed snapshot from the seeds
     // above without writing a new commit-log entry.
-    assert_eq!(snapshot, SnapshotId::new(2));
+    assert_eq!(snapshot, SnapshotIdentifier::new(2));
     let log = engine.commit_log().expect("commit log reads");
     assert_eq!(
         log.len(),

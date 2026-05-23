@@ -79,12 +79,12 @@ authorization, domain validation, and their own databases.
   so a peer reading the handover marker observes the same value the
   next successful commit will exceed.
 - `replay_from_sequence` returns commit-log entries by `CommitSequence`.
-- `commit_log_range` returns bounded replay entries by `SnapshotId`.
-- `CommitReceipt` carries the committed `CommitSequence`, `SnapshotId`, and
+- `commit_log_range` returns bounded replay entries by `SnapshotIdentifier`.
+- `CommitReceipt` carries the committed `CommitSequence`, `SnapshotIdentifier`, and
   operation count. Single-operation and multi-operation commits return the
   same receipt shape.
-- `QuerySnapshot` carries the latest observed `SnapshotId`.
-- `ValidationReceipt` carries the observed `SnapshotId` and record count.
+- `QuerySnapshot` carries the latest observed `SnapshotIdentifier`.
+- `ValidationReceipt` carries the observed `SnapshotIdentifier` and record count.
 - `Validate` does not write commit-log entries.
 - `list_tables` exposes registered table descriptors without exposing
   the mutable catalog.
@@ -92,7 +92,7 @@ authorization, domain validation, and their own databases.
   initial snapshot via the request's `Reply::Accepted` outcome.
 - `Subscribe` emits deltas only after the mutation commit succeeds.
 - For a multi-operation commit, `Subscribe` emits one per-operation delta after
-  the commit succeeds; every delta shares the commit `SnapshotId`.
+  the commit succeeds; every delta shares the commit `SnapshotIdentifier`.
 - Sink delivery is downstream of the commit and cannot roll back the
   mutation.
 - Subscription sinks choose detached or inline delivery. Detached is the
@@ -184,7 +184,7 @@ commit-log entries by `CommitSequence` so a peer can drain deltas from
 a known point. Failed commits do not advance the counter, so a crash
 between transactions resumes cleanly at the previous high-water mark.
 
-The sequence integrates with snapshots: `SnapshotId` still drives
+The sequence integrates with snapshots: `SnapshotIdentifier` still drives
 subscription replay through the existing snapshot cursor;
 `CommitSequence` is the boundary for cross-daemon handover. Both are
 durable, monotonic, and per-database.

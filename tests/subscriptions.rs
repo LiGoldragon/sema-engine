@@ -7,7 +7,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
     Assertion, CommitRequest, CommitSequence, DeltaKind, Engine, EngineOpen, EngineRecord,
-    Mutation, QueryPlan, RecordKey, Retraction, SequenceRange, SinkError, SnapshotId,
+    Mutation, QueryPlan, RecordKey, Retraction, SequenceRange, SinkError, SnapshotIdentifier,
     SubscriptionDeliveryMode, SubscriptionEvent, SubscriptionSink, TableDescriptor, TableName,
 };
 use tempfile::TempDir;
@@ -215,16 +215,19 @@ fn subscribe_initial_snapshot_uses_latest_committed_snapshot() {
         .expect("registrations read");
 
     assert_eq!(receipt.handle().id().value(), 1);
-    assert_eq!(receipt.initial().snapshot().snapshot(), SnapshotId::new(2));
+    assert_eq!(
+        receipt.initial().snapshot().snapshot(),
+        SnapshotIdentifier::new(2)
+    );
     assert_eq!(receipt.initial().snapshot().records().len(), 2);
     assert_eq!(registrations.len(), 1);
     assert_eq!(registrations[0].id().value(), 1);
     assert_eq!(registrations[0].table_name(), "subscribed_records");
-    assert_eq!(registrations[0].snapshot(), SnapshotId::new(2));
+    assert_eq!(registrations[0].snapshot(), SnapshotIdentifier::new(2));
     assert!(matches!(
         &sink.events()[0],
         SubscriptionEvent::InitialSnapshot(initial)
-            if initial.snapshot().snapshot() == SnapshotId::new(2)
+            if initial.snapshot().snapshot() == SnapshotIdentifier::new(2)
     ));
 }
 
@@ -251,7 +254,7 @@ fn subscribe_delta_fires_after_commit_is_visible() {
         .match_records(QueryPlan::key(records, RecordKey::new("alpha")))
         .expect("match succeeds");
 
-    assert_eq!(receipt.snapshot(), SnapshotId::new(1));
+    assert_eq!(receipt.snapshot(), SnapshotIdentifier::new(1));
     delivered_receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("delta is delivered");
@@ -263,7 +266,7 @@ fn subscribe_delta_fires_after_commit_is_visible() {
         matches!(
             event,
             SubscriptionEvent::Delta(delta)
-                if delta.snapshot() == SnapshotId::new(1)
+                if delta.snapshot() == SnapshotIdentifier::new(1)
                     && delta.record() == &SubscribedRecord::new("alpha", "visible")
         )
     }));
@@ -353,24 +356,24 @@ fn subscribe_commit_bundle_delivers_per_operation_deltas_after_single_snapshot_c
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(receipt.snapshot(), SnapshotId::new(3));
+    assert_eq!(receipt.snapshot(), SnapshotIdentifier::new(3));
     assert_eq!(receipt.operation_count(), 3);
     assert_eq!(
         delta_facts,
         [
             (
                 DeltaKind::Assert,
-                SnapshotId::new(3),
+                SnapshotIdentifier::new(3),
                 SubscribedRecord::new("beta", "new")
             ),
             (
                 DeltaKind::Mutate,
-                SnapshotId::new(3),
+                SnapshotIdentifier::new(3),
                 SubscribedRecord::new("alpha", "second")
             ),
             (
                 DeltaKind::Retract,
-                SnapshotId::new(3),
+                SnapshotIdentifier::new(3),
                 SubscribedRecord::new("gamma", "retire")
             )
         ]
@@ -400,7 +403,7 @@ fn subscribe_sink_failure_does_not_roll_back_commit() {
         .match_records(QueryPlan::key(records, RecordKey::new("alpha")))
         .expect("match succeeds");
 
-    assert_eq!(receipt.snapshot(), SnapshotId::new(1));
+    assert_eq!(receipt.snapshot(), SnapshotIdentifier::new(1));
     failed_receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("failing sink receives delta");
@@ -429,12 +432,12 @@ fn subscribe_inline_sink_receives_delta_before_assert_returns() {
         ))
         .expect("assert succeeds");
 
-    assert_eq!(receipt.snapshot(), SnapshotId::new(1));
+    assert_eq!(receipt.snapshot(), SnapshotIdentifier::new(1));
     assert!(sink.events().iter().any(|event| {
         matches!(
             event,
             SubscriptionEvent::Delta(delta)
-                if delta.snapshot() == SnapshotId::new(1)
+                if delta.snapshot() == SnapshotIdentifier::new(1)
                     && delta.record() == &SubscribedRecord::new("alpha", "inline")
         )
     }));
@@ -483,8 +486,8 @@ fn subscribe_blocking_sink_does_not_freeze_later_writes() {
         .match_records(QueryPlan::all(records))
         .expect("match succeeds");
 
-    assert_eq!(first.snapshot(), SnapshotId::new(1));
-    assert_eq!(second.snapshot(), SnapshotId::new(2));
+    assert_eq!(first.snapshot(), SnapshotIdentifier::new(1));
+    assert_eq!(second.snapshot(), SnapshotIdentifier::new(2));
     assert_eq!(matched.records().len(), 2);
 }
 
@@ -533,12 +536,12 @@ fn commit_log_range_replays_from_snapshot_cursor() {
         .expect("second assert succeeds");
 
     let replay = engine
-        .commit_log_range(SequenceRange::from(SnapshotId::new(2)))
+        .commit_log_range(SequenceRange::from(SnapshotIdentifier::new(2)))
         .expect("commit log range reads");
 
     assert_eq!(replay.len(), 1);
     assert_eq!(replay[0].commit_sequence(), CommitSequence::new(2));
-    assert_eq!(replay[0].snapshot(), SnapshotId::new(2));
+    assert_eq!(replay[0].snapshot(), SnapshotIdentifier::new(2));
     assert_eq!(
         replay[0].operations().head().key().map(RecordKey::as_str),
         Some("beta")
