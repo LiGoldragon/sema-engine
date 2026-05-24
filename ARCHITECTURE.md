@@ -226,3 +226,16 @@ production handover.
 - No actors in this crate.
 - No text parser in this crate.
 - No daemon process in this crate.
+
+## Macro-pattern integration
+
+**Status:** integrated into the brilliant macro library pattern per `reports/designer/326-v13-spirit-complete-schema-vision.md §3` (schemas as macro-pattern instance).
+
+**Role:** this crate is the typed database engine. It owns the `Engine` handle, the typed-table machinery, the `CommitSequence` high-water-mark contract, and the redb storage adapter. Per-component daemons consume this crate by declaring storage types in their schemas; the macro emits the redb table descriptors that bind those storage types into `Engine`.
+
+**Integration target:** typed database engine; the macro emits redb table descriptors from storage type declarations in component schemas. The schema-language storage block (per `/326-v13`) declares per-component records, indices, and projections; the macro lowers these into `sema-engine` table descriptor constants the component daemon registers with its `Engine` at startup. The engine surface itself does not change; the schema-engine upgrade replaces hand-written `TableDefinition` declarations with macro-emitted ones derived from the `.schema` storage block.
+
+**References:**
+- `reports/designer/326-v13-spirit-complete-schema-vision.md` — schema language + macro pattern
+- `reports/designer/324-migration-mvp-spirit-handover-re-specification.md` — migration MVP
+- `reports/operator/174-schema-import-header-design-critique-2026-05-24.md` — lowering + AssembledSchema form
