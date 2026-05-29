@@ -35,6 +35,11 @@ authorization, domain validation, and their own databases.
   `WriteOperation::Assert` entry; failure rolls back the whole bundle.
 - `Mutate` replaces existing records through a registered record family.
 - `Retract` removes existing records through a registered record family.
+- `Retract` is **destructive at the storage layer**. redb is copy-on-write,
+  so the freed pages — the record's bytes — are reclaimed and overwritten by
+  later commits, and a retracted record becomes unrecoverable from the file.
+  Callers that might need a removed record back must capture it before
+  retracting. See `sema` ARCHITECTURE §"Deletion durability".
 - `Engine::commit` takes the engine-native `CommitRequest<RecordValue>`
   whose non-empty `Vec<WriteOperation<RecordValue>>` is the atomic unit
   for one registered table. Atomicity is **structural** — the commit's
