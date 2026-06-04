@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema::SchemaVersion;
 use sema_engine::{
     AggregatePlan, Assertion, CommitRequest, CommitSequence, Engine, EngineOpen, EngineRecord,
-    FieldSelection, KeyRange, Mutation, QueryPlan, ReadOperator, RecordKey, RecursionMode,
-    Retraction, RuleSetRef, SnapshotIdentifier, TableDescriptor, TableName, UnificationPlan,
+    FieldSelection, IdentifiedAssertion, IdentifiedQueryPlan, IdentifiedRetraction,
+    IdentifiedTableDescriptor, KeyRange, Mutation, QueryPlan, ReadOperator, RecordIdentifier,
+    RecordKey, RecursionMode, Retraction, RuleSetRef, SchemaVersion, SnapshotIdentifier,
+    TableDescriptor, TableName, UnificationPlan,
 };
 use signal_sema::SemaOperation;
 use tempfile::TempDir;
@@ -44,7 +45,7 @@ impl EngineFixture {
     }
 
     fn database_path(&self) -> PathBuf {
-        self.directory.path().join("engine.redb")
+        self.directory.path().join("engine.sema")
     }
 
     fn open_engine(&self) -> Engine {
@@ -54,6 +55,10 @@ impl EngineFixture {
 
     fn toy_descriptor(&self) -> TableDescriptor<ToyRecord> {
         TableDescriptor::new(TableName::new("toy_records"))
+    }
+
+    fn identified_descriptor(&self) -> IdentifiedTableDescriptor<ToyRecord> {
+        IdentifiedTableDescriptor::new(TableName::new("identified_toy_records"))
     }
 }
 
@@ -147,6 +152,90 @@ fn engine_executes_key_range_read_plan_over_registered_record_family() {
             ToyRecord::new("alpha", "alpha"),
             ToyRecord::new("beta", "beta")
         ]
+    );
+}
+
+#[test]
+fn engine_allocates_numeric_identifiers_for_identified_record_family() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_identified_table(fixture.identified_descriptor())
+        .expect("identified table registers");
+
+    let first = engine
+        .assert_identified(IdentifiedAssertion::new(
+            records,
+            ToyRecord::new("ignored-domain-key", "first identified"),
+        ))
+        .expect("first identified assert succeeds");
+    let second = engine
+        .assert_identified(IdentifiedAssertion::new(
+            records,
+            ToyRecord::new("another-domain-key", "second identified"),
+        ))
+        .expect("second identified assert succeeds");
+    let snapshot = engine
+        .match_identified(IdentifiedQueryPlan::identifier(
+            records,
+            RecordIdentifier::new(2),
+        ))
+        .expect("identified match succeeds");
+
+    assert_eq!(first.identifier(), RecordIdentifier::new(1));
+    assert_eq!(first.commit_sequence(), CommitSequence::new(1));
+    assert_eq!(second.identifier(), RecordIdentifier::new(2));
+    assert_eq!(second.commit_sequence(), CommitSequence::new(2));
+    assert_eq!(snapshot.records().len(), 1);
+    assert_eq!(snapshot.records()[0].identifier(), RecordIdentifier::new(2));
+    assert_eq!(
+        snapshot.records()[0].value(),
+        &ToyRecord::new("another-domain-key", "second identified")
+    );
+}
+
+#[test]
+fn identified_record_counter_survives_reopen_and_retract_advances_sequence() {
+    let fixture = EngineFixture::new();
+    {
+        let mut engine = fixture.open_engine();
+        let records = engine
+            .register_identified_table(fixture.identified_descriptor())
+            .expect("identified table registers");
+        engine
+            .assert_identified(IdentifiedAssertion::new(
+                records,
+                ToyRecord::new("alpha", "first"),
+            ))
+            .expect("first identified assert succeeds");
+    }
+
+    let mut reopened = fixture.open_engine();
+    let records = reopened
+        .register_identified_table(fixture.identified_descriptor())
+        .expect("identified table reference is reconstructed");
+    let second = reopened
+        .assert_identified(IdentifiedAssertion::new(
+            records,
+            ToyRecord::new("beta", "second"),
+        ))
+        .expect("second identified assert succeeds after reopen");
+    let retraction = reopened
+        .retract_identified(IdentifiedRetraction::new(records, RecordIdentifier::new(1)))
+        .expect("identified retract succeeds");
+    let remaining = reopened
+        .match_identified(IdentifiedQueryPlan::all(records))
+        .expect("identified all match succeeds");
+
+    assert_eq!(second.identifier(), RecordIdentifier::new(2));
+    assert_eq!(second.commit_sequence(), CommitSequence::new(2));
+    assert_eq!(retraction.operation(), SemaOperation::Retract);
+    assert_eq!(retraction.identifier(), RecordIdentifier::new(1));
+    assert_eq!(retraction.commit_sequence(), CommitSequence::new(3));
+    assert_eq!(remaining.records().len(), 1);
+    assert_eq!(
+        remaining.records()[0].identifier(),
+        RecordIdentifier::new(2)
     );
 }
 

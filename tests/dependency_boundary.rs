@@ -33,6 +33,16 @@ fn sema_engine_ships_no_daemon_binary() {
 }
 
 #[test]
+fn sema_engine_carries_repo_local_intent_context() {
+    let fixture = RepositoryFixture::current();
+
+    assert!(fixture.has_file("INTENT.md"));
+    assert!(fixture.has_file("ARCHITECTURE.md"));
+    assert!(fixture.has_file("AGENTS.md"));
+    assert!(fixture.has_file("skills.md"));
+}
+
+#[test]
 fn sema_engine_has_no_runtime_or_text_dependencies() {
     let fixture = RepositoryFixture::current();
     let cargo = fixture.cargo_toml();
@@ -50,6 +60,14 @@ fn sema_engine_has_no_runtime_or_text_dependencies() {
             "Cargo.toml must not contain {forbidden}"
         );
     }
+}
+
+#[test]
+fn sema_engine_does_not_depend_on_raw_redb_directly() {
+    let fixture = RepositoryFixture::current();
+    let cargo = fixture.cargo_toml();
+
+    assert!(!cargo.contains("redb ="));
 }
 
 #[test]

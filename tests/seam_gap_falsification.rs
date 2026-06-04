@@ -19,9 +19,8 @@ use std::sync::Mutex;
 use std::sync::{Arc, atomic::AtomicUsize, atomic::Ordering};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema::SchemaVersion;
 use sema_engine::{
-    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, SinkError,
+    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, SchemaVersion, SinkError,
     SnapshotIdentifier, SubscriptionEvent, SubscriptionIdentifier, SubscriptionSink,
     TableDescriptor, TableName,
 };
@@ -83,7 +82,7 @@ impl Fixture {
     }
 
     fn database_path(&self) -> PathBuf {
-        self.directory.path().join("engine.redb")
+        self.directory.path().join("engine.sema")
     }
 
     fn open_engine(&self) -> Engine {

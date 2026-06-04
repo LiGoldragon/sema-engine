@@ -4,13 +4,22 @@ use signal_sema::SemaOperation;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
-use crate::{RecordKey, SnapshotIdentifier, TableName, TableReference};
+use crate::{
+    IdentifiedRecord, IdentifiedTableReference, RecordIdentifier, RecordKey, SnapshotIdentifier,
+    TableName, TableReference,
+};
 
 #[derive(Debug, Clone)]
 pub struct QueryPlan<RecordValue> {
     table: TableReference<RecordValue>,
     filter: QueryFilter,
     read_plan: ReadPlan<RecordValue>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IdentifiedQueryPlan<RecordValue> {
+    table: IdentifiedTableReference<RecordValue>,
+    read_plan: IdentifiedReadPlan,
 }
 
 impl<RecordValue> QueryPlan<RecordValue> {
@@ -99,6 +108,43 @@ impl<RecordValue> QueryPlan<RecordValue> {
     }
 }
 
+impl<RecordValue> IdentifiedQueryPlan<RecordValue> {
+    pub fn all(table: IdentifiedTableReference<RecordValue>) -> Self {
+        Self {
+            table,
+            read_plan: IdentifiedReadPlan::all_rows(),
+        }
+    }
+
+    pub fn identifier(
+        table: IdentifiedTableReference<RecordValue>,
+        identifier: RecordIdentifier,
+    ) -> Self {
+        Self {
+            table,
+            read_plan: IdentifiedReadPlan::by_identifier(identifier),
+        }
+    }
+
+    pub fn identifier_range(
+        table: IdentifiedTableReference<RecordValue>,
+        range: RecordIdentifierRange,
+    ) -> Self {
+        Self {
+            table,
+            read_plan: IdentifiedReadPlan::by_identifier_range(range),
+        }
+    }
+
+    pub fn table(&self) -> &IdentifiedTableReference<RecordValue> {
+        &self.table
+    }
+
+    pub fn read_plan(&self) -> &IdentifiedReadPlan {
+        &self.read_plan
+    }
+}
+
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 #[rkyv(derive(Debug))]
 pub enum QueryFilter {
@@ -124,6 +170,13 @@ pub struct KeyRange {
     end: Option<RecordKey>,
 }
 
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct RecordIdentifierRange {
+    start: Option<RecordIdentifier>,
+    end: Option<RecordIdentifier>,
+}
+
 impl KeyRange {
     pub fn new(start: Option<RecordKey>, end: Option<RecordKey>) -> Self {
         Self { start, end }
@@ -147,10 +200,39 @@ impl KeyRange {
     }
 }
 
+impl RecordIdentifierRange {
+    pub fn new(start: Option<RecordIdentifier>, end: Option<RecordIdentifier>) -> Self {
+        Self { start, end }
+    }
+
+    pub fn from(start: RecordIdentifier) -> Self {
+        Self::new(Some(start), None)
+    }
+
+    pub fn through(end: RecordIdentifier) -> Self {
+        Self::new(None, Some(end))
+    }
+
+    pub fn between(start: RecordIdentifier, end: RecordIdentifier) -> Self {
+        Self::new(Some(start), Some(end))
+    }
+
+    pub fn contains(&self, identifier: RecordIdentifier) -> bool {
+        self.start
+            .is_none_or(|start| identifier.value() >= start.value())
+            && self.end.is_none_or(|end| identifier.value() <= end.value())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadPlan<RecordValue> {
     node: ReadPlanNode,
     record: PhantomData<fn() -> RecordValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentifiedReadPlan {
+    node: IdentifiedReadPlanNode,
 }
 
 impl<RecordValue> ReadPlan<RecordValue> {
@@ -221,6 +303,32 @@ impl<RecordValue> ReadPlan<RecordValue> {
     }
 }
 
+impl IdentifiedReadPlan {
+    pub fn all_rows() -> Self {
+        Self::new(IdentifiedReadPlanNode::AllRows)
+    }
+
+    pub fn by_identifier(identifier: RecordIdentifier) -> Self {
+        Self::new(IdentifiedReadPlanNode::ByIdentifier(identifier))
+    }
+
+    pub fn by_identifier_range(range: RecordIdentifierRange) -> Self {
+        Self::new(IdentifiedReadPlanNode::ByIdentifierRange(range))
+    }
+
+    pub fn operator(&self) -> ReadOperator {
+        self.node.operator()
+    }
+
+    pub fn node(&self) -> &IdentifiedReadPlanNode {
+        &self.node
+    }
+
+    fn new(node: IdentifiedReadPlanNode) -> Self {
+        Self { node }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadPlanNode {
     AllRows,
@@ -251,6 +359,13 @@ pub enum ReadPlanNode {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentifiedReadPlanNode {
+    AllRows,
+    ByIdentifier(RecordIdentifier),
+    ByIdentifierRange(RecordIdentifierRange),
+}
+
 impl ReadPlanNode {
     pub fn operator(&self) -> ReadOperator {
         match self {
@@ -263,6 +378,16 @@ impl ReadPlanNode {
             Self::Aggregate { .. } => ReadOperator::Aggregate,
             Self::Infer { .. } => ReadOperator::Infer,
             Self::Recurse { .. } => ReadOperator::Recurse,
+        }
+    }
+}
+
+impl IdentifiedReadPlanNode {
+    pub fn operator(&self) -> ReadOperator {
+        match self {
+            Self::AllRows => ReadOperator::AllRows,
+            Self::ByIdentifier(_) => ReadOperator::ByKey,
+            Self::ByIdentifierRange(_) => ReadOperator::ByKeyRange,
         }
     }
 }
@@ -389,6 +514,14 @@ pub struct QuerySnapshot<RecordValue> {
     records: Vec<RecordValue>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentifiedQuerySnapshot<RecordValue> {
+    operation: SemaOperation,
+    table: TableName,
+    snapshot: SnapshotIdentifier,
+    records: Vec<IdentifiedRecord<RecordValue>>,
+}
+
 impl<RecordValue> QuerySnapshot<RecordValue> {
     pub fn new(
         operation: SemaOperation,
@@ -418,6 +551,42 @@ impl<RecordValue> QuerySnapshot<RecordValue> {
 
     pub fn records(&self) -> &[RecordValue] {
         &self.records
+    }
+}
+
+impl<RecordValue> IdentifiedQuerySnapshot<RecordValue> {
+    pub fn new(
+        operation: SemaOperation,
+        table: TableName,
+        snapshot: SnapshotIdentifier,
+        records: Vec<IdentifiedRecord<RecordValue>>,
+    ) -> Self {
+        Self {
+            operation,
+            table,
+            snapshot,
+            records,
+        }
+    }
+
+    pub fn operation(&self) -> SemaOperation {
+        self.operation
+    }
+
+    pub fn table(&self) -> &TableName {
+        &self.table
+    }
+
+    pub fn snapshot(&self) -> SnapshotIdentifier {
+        self.snapshot
+    }
+
+    pub fn records(&self) -> &[IdentifiedRecord<RecordValue>] {
+        &self.records
+    }
+
+    pub fn into_records(self) -> Vec<IdentifiedRecord<RecordValue>> {
+        self.records
     }
 }
 

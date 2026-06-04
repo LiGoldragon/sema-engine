@@ -4,11 +4,11 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema::SchemaVersion;
 use sema_engine::{
     Assertion, CommitRequest, CommitSequence, DeltaKind, Engine, EngineOpen, EngineRecord,
-    Mutation, QueryPlan, RecordKey, Retraction, SequenceRange, SinkError, SnapshotIdentifier,
-    SubscriptionDeliveryMode, SubscriptionEvent, SubscriptionSink, TableDescriptor, TableName,
+    Mutation, QueryPlan, RecordKey, Retraction, SchemaVersion, SequenceRange, SinkError,
+    SnapshotIdentifier, SubscriptionDeliveryMode, SubscriptionEvent, SubscriptionSink,
+    TableDescriptor, TableName,
 };
 use tempfile::TempDir;
 
@@ -46,7 +46,7 @@ impl SubscriptionFixture {
     }
 
     fn database_path(&self) -> PathBuf {
-        self.directory.path().join("engine.redb")
+        self.directory.path().join("engine.sema")
     }
 
     fn open_engine(&self) -> Engine {

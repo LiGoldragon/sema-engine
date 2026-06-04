@@ -14,10 +14,13 @@ use signal_sema::SemaOperation;
 use crate::log::{CommitLogEntry, CommitLogOperation};
 use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
-    Catalog, CommitRequest, DeltaKind, EngineStoredRecord, Error, InitialSnapshot, QueryPlan,
-    QuerySnapshot, Result, Retraction, SequenceRange, SnapshotIdentifier, SubscriptionHandle,
-    SubscriptionIdentifier, SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink,
-    TableDescriptor, TableReference, TableRegistration, WriteOperation,
+    Catalog, CommitRequest, DeltaKind, EngineStoredRecord, EngineStoredValue, Error,
+    IdentifiedAssertion, IdentifiedMutationReceipt, IdentifiedQueryPlan, IdentifiedQuerySnapshot,
+    IdentifiedRecord, IdentifiedRetraction, IdentifiedTableDescriptor, IdentifiedTableReference,
+    InitialSnapshot, QueryPlan, QuerySnapshot, RecordIdentifier, Result, Retraction, SequenceRange,
+    SnapshotIdentifier, SubscriptionHandle, SubscriptionIdentifier, SubscriptionReceipt,
+    SubscriptionRegistration, SubscriptionSink, TableDescriptor, TableReference, TableRegistration,
+    WriteOperation,
 };
 
 const CATALOG: sema::Table<&'static str, TableRegistration> =
@@ -29,6 +32,8 @@ const NEXT_SUBSCRIPTION_KEY: &str = "next_subscription";
 const COMMIT_LOG: sema::Table<u64, CommitLogEntry> = sema::Table::new("__sema_engine_commit_log");
 const SUBSCRIPTIONS: sema::Table<u64, SubscriptionRegistration> =
     sema::Table::new("__sema_engine_subscriptions");
+const IDENTIFIED_COUNTERS: sema::Table<String, u64> =
+    sema::Table::new("__sema_engine_identified_counters");
 
 pub struct Engine {
     storage: sema::Sema,
@@ -64,6 +69,147 @@ impl Engine {
             self.catalog.insert(registration)?;
         }
         Ok(TableReference::new(*descriptor.name()))
+    }
+
+    pub fn register_identified_table<RecordValue>(
+        &mut self,
+        descriptor: IdentifiedTableDescriptor<RecordValue>,
+    ) -> Result<IdentifiedTableReference<RecordValue>> {
+        let registration = TableRegistration::new(descriptor.name());
+        if !self.catalog.is_registered(descriptor.name()) {
+            let counter_key = descriptor.name().identified_counter_key();
+            self.storage.write(|transaction| {
+                CATALOG.insert(transaction, descriptor.name().as_str(), &registration)?;
+                IDENTIFIED_COUNTERS.insert(
+                    transaction,
+                    counter_key,
+                    &RecordIdentifier::first().value(),
+                )
+            })?;
+            self.catalog.insert(registration)?;
+        }
+        Ok(IdentifiedTableReference::new(*descriptor.name()))
+    }
+
+    pub fn assert_identified<RecordValue>(
+        &self,
+        assertion: IdentifiedAssertion<RecordValue>,
+    ) -> Result<IdentifiedMutationReceipt>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        self.ensure_identified_registered(assertion.table())?;
+
+        let identifier = self.next_record_identifier(assertion.table())?;
+        let commit_sequence = self.next_commit_sequence()?;
+        let snapshot = self.next_snapshot()?;
+        let entry = CommitLogEntry::single(
+            commit_sequence,
+            snapshot,
+            CommitLogOperation::new(
+                SemaOperation::Assert,
+                *assertion.table().name(),
+                Some(crate::RecordKey::new(identifier.value().to_string())),
+            ),
+        );
+        let counter_key = assertion.table().name().identified_counter_key();
+        self.storage.write(|transaction| {
+            assertion.table().sema_table().insert(
+                transaction,
+                identifier.value(),
+                assertion.record(),
+            )?;
+            COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+            COUNTERS.insert(
+                transaction,
+                LATEST_COMMIT_SEQUENCE_KEY,
+                &commit_sequence.value(),
+            )?;
+            COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
+            IDENTIFIED_COUNTERS.insert(transaction, counter_key, &identifier.next().value())?;
+            Ok(())
+        })?;
+
+        Ok(IdentifiedMutationReceipt::new(
+            SemaOperation::Assert,
+            *assertion.table().name(),
+            identifier,
+            commit_sequence,
+            snapshot,
+        ))
+    }
+
+    pub fn retract_identified<RecordValue>(
+        &self,
+        retraction: IdentifiedRetraction<RecordValue>,
+    ) -> Result<IdentifiedMutationReceipt>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        self.ensure_identified_registered(retraction.table())?;
+
+        let Some(_record) = self.storage.read(|transaction| {
+            retraction
+                .table()
+                .sema_table()
+                .get(transaction, retraction.identifier().value())
+        })?
+        else {
+            return Err(
+                self.identified_record_not_found(retraction.table(), retraction.identifier())
+            );
+        };
+
+        let commit_sequence = self.next_commit_sequence()?;
+        let snapshot = self.next_snapshot()?;
+        let entry = CommitLogEntry::single(
+            commit_sequence,
+            snapshot,
+            CommitLogOperation::new(
+                SemaOperation::Retract,
+                *retraction.table().name(),
+                Some(crate::RecordKey::new(
+                    retraction.identifier().value().to_string(),
+                )),
+            ),
+        );
+        let removed = self.storage.write(|transaction| {
+            let removed = retraction
+                .table()
+                .sema_table()
+                .remove(transaction, retraction.identifier().value())?;
+            if removed {
+                COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+                COUNTERS.insert(
+                    transaction,
+                    LATEST_COMMIT_SEQUENCE_KEY,
+                    &commit_sequence.value(),
+                )?;
+                COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
+            }
+            Ok(removed)
+        })?;
+        if !removed {
+            return Err(
+                self.identified_record_not_found(retraction.table(), retraction.identifier())
+            );
+        }
+
+        Ok(IdentifiedMutationReceipt::new(
+            SemaOperation::Retract,
+            *retraction.table().name(),
+            retraction.identifier(),
+            commit_sequence,
+            snapshot,
+        ))
     }
 
     pub fn assert<RecordValue>(
@@ -497,6 +643,71 @@ impl Engine {
         ))
     }
 
+    pub fn match_identified<RecordValue>(
+        &self,
+        query: IdentifiedQueryPlan<RecordValue>,
+    ) -> Result<IdentifiedQuerySnapshot<RecordValue>>
+    where
+        RecordValue: EngineStoredValue,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        self.ensure_identified_registered(query.table())?;
+
+        let snapshot = self.latest_snapshot()?;
+        let records = match query.read_plan().node() {
+            crate::IdentifiedReadPlanNode::AllRows => self.storage.read(|transaction| {
+                Ok(query
+                    .table()
+                    .sema_table()
+                    .iter(transaction)?
+                    .into_iter()
+                    .map(|(identifier, record)| {
+                        IdentifiedRecord::new(RecordIdentifier::new(identifier), record)
+                    })
+                    .collect())
+            })?,
+            crate::IdentifiedReadPlanNode::ByIdentifier(identifier) => {
+                self.storage.read(|transaction| {
+                    Ok(query
+                        .table()
+                        .sema_table()
+                        .get(transaction, identifier.value())?
+                        .map(|record| IdentifiedRecord::new(*identifier, record))
+                        .into_iter()
+                        .collect())
+                })?
+            }
+            crate::IdentifiedReadPlanNode::ByIdentifierRange(range) => {
+                self.storage.read(|transaction| {
+                    Ok(query
+                        .table()
+                        .sema_table()
+                        .iter(transaction)?
+                        .into_iter()
+                        .filter_map(|(identifier, record)| {
+                            let identifier = RecordIdentifier::new(identifier);
+                            if range.contains(identifier) {
+                                Some(IdentifiedRecord::new(identifier, record))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect())
+                })?
+            }
+        };
+
+        Ok(IdentifiedQuerySnapshot::new(
+            SemaOperation::Match,
+            *query.table().name(),
+            snapshot,
+            records,
+        ))
+    }
+
     pub fn validate<RecordValue>(
         &self,
         query: QueryPlan<RecordValue>,
@@ -624,7 +835,34 @@ impl Engine {
         Ok(self.current_commit_sequence()?.next())
     }
 
+    fn next_record_identifier<RecordValue>(
+        &self,
+        table: &IdentifiedTableReference<RecordValue>,
+    ) -> Result<RecordIdentifier> {
+        let counter_key = table.name().identified_counter_key();
+        let value = self.storage.read(|transaction| {
+            Ok(IDENTIFIED_COUNTERS
+                .get(transaction, counter_key)?
+                .map(RecordIdentifier::new)
+                .unwrap_or_else(RecordIdentifier::first))
+        })?;
+        Ok(value)
+    }
+
     fn ensure_registered<RecordValue>(&self, table: &TableReference<RecordValue>) -> Result<()> {
+        if self.catalog.is_registered(table.name()) {
+            Ok(())
+        } else {
+            Err(Error::TableNotRegistered {
+                table: table.name().as_str().to_owned(),
+            })
+        }
+    }
+
+    fn ensure_identified_registered<RecordValue>(
+        &self,
+        table: &IdentifiedTableReference<RecordValue>,
+    ) -> Result<()> {
         if self.catalog.is_registered(table.name()) {
             Ok(())
         } else {
@@ -642,6 +880,17 @@ impl Engine {
         Error::RecordNotFound {
             table: table.name().as_str().to_owned(),
             key: key.to_owned_string(),
+        }
+    }
+
+    fn identified_record_not_found<RecordValue>(
+        &self,
+        table: &IdentifiedTableReference<RecordValue>,
+        identifier: RecordIdentifier,
+    ) -> Error {
+        Error::RecordNotFound {
+            table: table.name().as_str().to_owned(),
+            key: identifier.value().to_string(),
         }
     }
 

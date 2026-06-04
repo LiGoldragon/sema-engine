@@ -1,10 +1,9 @@
 use std::path::PathBuf;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema::SchemaVersion;
 use sema_engine::{
     Assertion, CommitRequest, CommitSequence, Engine, EngineOpen, EngineRecord, QueryPlan,
-    RecordKey, SnapshotIdentifier, TableDescriptor, TableName,
+    RecordKey, SchemaVersion, SnapshotIdentifier, TableDescriptor, TableName,
 };
 use signal_sema::SemaOperation;
 use tempfile::TempDir;
@@ -43,7 +42,7 @@ impl LogFixture {
     }
 
     fn database_path(&self) -> PathBuf {
-        self.directory.path().join("engine.redb")
+        self.directory.path().join("engine.sema")
     }
 
     fn open_engine(&self) -> Engine {

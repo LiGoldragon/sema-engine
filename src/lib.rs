@@ -22,14 +22,19 @@ pub use engine::{Engine, EngineOpen};
 pub use error::{Error, Result};
 pub use log::{CommitLogEntry, CommitLogOperation};
 pub use mutation::{
-    Assertion, CommitReceipt, CommitRequest, Mutation, MutationReceipt, Retraction, WriteOperation,
+    Assertion, CommitReceipt, CommitRequest, IdentifiedAssertion, IdentifiedMutationReceipt,
+    IdentifiedRetraction, Mutation, MutationReceipt, Retraction, WriteOperation,
 };
 pub use query::{
-    AggregatePlan, FieldSelection, KeyRange, PredicatePlan, QueryFilter, QueryPlan, QuerySnapshot,
-    ReadOperator, ReadPlan, ReadPlanNode, RecursionMode, RuleSetRef, UnificationPlan,
-    ValidationReceipt,
+    AggregatePlan, FieldSelection, IdentifiedQueryPlan, IdentifiedQuerySnapshot,
+    IdentifiedReadPlan, IdentifiedReadPlanNode, KeyRange, PredicatePlan, QueryFilter, QueryPlan,
+    QuerySnapshot, ReadOperator, ReadPlan, ReadPlanNode, RecordIdentifierRange, RecursionMode,
+    RuleSetRef, UnificationPlan, ValidationReceipt,
 };
-pub use record::{EngineRecord, EngineStoredRecord, RecordKey};
+pub use record::{
+    EngineRecord, EngineStoredRecord, EngineStoredValue, RecordIdentifier, RecordKey,
+};
+pub use sema::SchemaVersion;
 pub use sequence::CommitSequence;
 pub use snapshot::SnapshotIdentifier;
 pub use subscribe::{
@@ -37,4 +42,7 @@ pub use subscribe::{
     SubscriptionDeliveryMode, SubscriptionDelta, SubscriptionEvent, SubscriptionHandle,
     SubscriptionIdentifier, SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink,
 };
-pub use table::{TableDescriptor, TableName, TableReference};
+pub use table::{
+    IdentifiedRecord, IdentifiedTableDescriptor, IdentifiedTableReference, TableDescriptor,
+    TableName, TableReference,
+};

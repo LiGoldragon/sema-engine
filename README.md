@@ -2,7 +2,7 @@
 
 `sema-engine` is the full database engine library over `sema` and
 `signal-core`. It executes typed database verbs over component-owned
-redb files.
+`.sema` files.
 
 It is library-only: no daemon, no actors, no sockets, no NOTA parser,
 and no Persona-specific contract dependencies.
@@ -22,6 +22,13 @@ key range. Query-algebra operators `Constrain`, `Project`, `Aggregate`,
 sinks may use detached delivery for blocking consumers or inline delivery
 for actor enqueue consumers that need deterministic post-commit ordering
 without polling.
+
+Two table identities are supported. Domain-keyed families use
+`TableDescriptor<RecordValue>` plus `EngineRecord::record_key`. Schema
+contracts that require engine-assigned numeric identity use
+`IdentifiedTableDescriptor<RecordValue>`; `Engine` allocates durable
+`RecordIdentifier` values, persists the counter across reopen, and returns
+identified receipts/snapshots.
 
 `Assert` rejects records whose key already exists (typed
 `DuplicateAssertKey`); `Mutate` and `Retract` reject missing records

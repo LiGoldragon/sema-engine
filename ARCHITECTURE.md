@@ -5,9 +5,11 @@ sits between the `sema` storage kernel and state-bearing component
 daemons.
 
 `sema` opens redb files, validates format/schema, and reads/writes typed
-rkyv tables. `sema-engine` executes `signal-sema` database operations over
-registered record families. Component daemons own actors, sockets,
-authorization, domain validation, and their own databases.
+rkyv tables behind the component-facing `.sema` file type. `sema-engine`
+executes `signal-sema` database operations over registered record
+families. Component daemons own actors, sockets, authorization, domain
+validation, and their own databases through `Engine`, not through raw
+redb calls.
 
 ## Constraints
 
@@ -26,8 +28,13 @@ authorization, domain validation, and their own databases.
   through that actor.
 - Consumers that still have unmigrated component-local tables use
   `Engine::storage_kernel()` rather than opening a second `sema::Sema`
-  handle to the same redb file.
+  handle to the same `.sema` file.
 - `Engine` registers record families before executing database operations.
+- Domain-keyed record families use `TableDescriptor` /
+  `TableReference` and record-provided `RecordKey` values.
+- Engine-identified record families use `IdentifiedTableDescriptor` /
+  `IdentifiedTableReference`; `Engine` allocates durable numeric
+  `RecordIdentifier` values and persists the next-identifier counter.
 - `Assert` writes records through a registered record family.
 - `Assert` rejects records whose key already exists in the table with a
   typed `DuplicateAssertKey` error — `Mutate` is the only replacement
@@ -115,7 +122,7 @@ flowchart TD
     sema["sema<br/>storage kernel"]
     engine["sema-engine<br/>database operation execution"]
     component["component daemon<br/>Kameo actor tree"]
-    database["component.redb"]
+    database["component.sema"]
 
     engine --> sema
     engine --> signal_sema
@@ -172,6 +179,25 @@ typed rkyv values, commit-log cursor, bounded log replay, table
 introspection, best-effort post-commit subscription delivery for write
 operations, and durable storage through `sema`.
 
+For schema contracts that need engine-assigned numeric record identity, a
+component registers an identified family instead of deriving identity from
+the record payload:
+
+```rust
+let mut engine = Engine::open(EngineOpen::new(database_path, SchemaVersion::new(1)))?;
+let entries = engine.register_identified_table(
+    IdentifiedTableDescriptor::new(TableName::new("entries")),
+)?;
+
+let receipt = engine.assert_identified(IdentifiedAssertion::new(entries, entry))?;
+let identifier = receipt.identifier();
+let found = engine.match_identified(IdentifiedQueryPlan::identifier(entries, identifier))?;
+engine.retract_identified(IdentifiedRetraction::new(entries, identifier))?;
+```
+
+The numeric identifier and the `CommitSequence` are both engine state.
+Component daemons do not keep a parallel ledger.
+
 ## CommitSequence — durable high-water mark for handover
 
 Every successful write transaction advances a per-database
@@ -226,6 +252,7 @@ production handover.
 - No raw byte slot store. (Handover raw payloads live in a separate
   container outside this engine's typed tables — see the section
   above.)
+- No raw redb access from component daemons.
 - No second redb handle for a component database already opened by
   `Engine`.
 - No actors in this crate.
@@ -238,7 +265,14 @@ production handover.
 
 **Role:** this crate is the typed database engine. It owns the `Engine` handle, the typed-table machinery, the `CommitSequence` high-water-mark contract, and the redb storage adapter. Per-component daemons consume this crate by declaring storage types in their schemas; the macro emits the redb table descriptors that bind those storage types into `Engine`.
 
-**Integration target:** typed database engine; the macro emits redb table descriptors from storage type declarations in component schemas. The schema-language storage block (per `/326-v13`) declares per-component records, indices, and projections; the macro lowers these into `sema-engine` table descriptor constants the component daemon registers with its `Engine` at startup. The engine surface itself does not change; the schema-engine upgrade replaces hand-written `TableDefinition` declarations with macro-emitted ones derived from the `.schema` storage block.
+**Integration target:** typed database engine; the macro emits sema-engine
+table descriptors from storage type declarations in component schemas. The
+schema-language storage block (per `/326-v13`) declares per-component
+records, indices, identity style, and projections; the macro lowers these
+into `TableDescriptor` or `IdentifiedTableDescriptor` constants the
+component daemon registers with its `Engine` at startup. The schema-engine
+upgrade replaces hand-written `TableDefinition` declarations with
+macro-emitted descriptors derived from the `.schema` storage block.
 
 **References:**
 - `reports/designer/326-v13-spirit-complete-schema-vision.md` — schema language + macro pattern

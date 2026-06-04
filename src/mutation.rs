@@ -1,7 +1,8 @@
 use signal_sema::SemaOperation;
 
 use crate::{
-    CommitSequence, EngineRecord, RecordKey, SnapshotIdentifier, TableName, TableReference,
+    CommitSequence, EngineRecord, IdentifiedTableReference, RecordIdentifier, RecordKey,
+    SnapshotIdentifier, TableName, TableReference,
 };
 
 #[derive(Debug, Clone)]
@@ -33,6 +34,27 @@ pub struct MutationReceipt {
     snapshot: SnapshotIdentifier,
 }
 
+#[derive(Debug, Clone)]
+pub struct IdentifiedAssertion<RecordValue> {
+    table: IdentifiedTableReference<RecordValue>,
+    record: RecordValue,
+}
+
+#[derive(Debug, Clone)]
+pub struct IdentifiedRetraction<RecordValue> {
+    table: IdentifiedTableReference<RecordValue>,
+    identifier: RecordIdentifier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentifiedMutationReceipt {
+    operation: SemaOperation,
+    table: TableName,
+    identifier: RecordIdentifier,
+    commit_sequence: CommitSequence,
+    snapshot: SnapshotIdentifier,
+}
+
 impl MutationReceipt {
     pub fn new(
         operation: SemaOperation,
@@ -60,6 +82,72 @@ impl MutationReceipt {
 
     pub fn key(&self) -> &RecordKey {
         &self.key
+    }
+
+    pub fn commit_sequence(&self) -> CommitSequence {
+        self.commit_sequence
+    }
+
+    pub fn snapshot(&self) -> SnapshotIdentifier {
+        self.snapshot
+    }
+}
+
+impl<RecordValue> IdentifiedAssertion<RecordValue> {
+    pub fn new(table: IdentifiedTableReference<RecordValue>, record: RecordValue) -> Self {
+        Self { table, record }
+    }
+
+    pub fn table(&self) -> &IdentifiedTableReference<RecordValue> {
+        &self.table
+    }
+
+    pub fn record(&self) -> &RecordValue {
+        &self.record
+    }
+}
+
+impl<RecordValue> IdentifiedRetraction<RecordValue> {
+    pub fn new(table: IdentifiedTableReference<RecordValue>, identifier: RecordIdentifier) -> Self {
+        Self { table, identifier }
+    }
+
+    pub fn table(&self) -> &IdentifiedTableReference<RecordValue> {
+        &self.table
+    }
+
+    pub fn identifier(&self) -> RecordIdentifier {
+        self.identifier
+    }
+}
+
+impl IdentifiedMutationReceipt {
+    pub fn new(
+        operation: SemaOperation,
+        table: TableName,
+        identifier: RecordIdentifier,
+        commit_sequence: CommitSequence,
+        snapshot: SnapshotIdentifier,
+    ) -> Self {
+        Self {
+            operation,
+            table,
+            identifier,
+            commit_sequence,
+            snapshot,
+        }
+    }
+
+    pub fn operation(&self) -> SemaOperation {
+        self.operation
+    }
+
+    pub fn table(&self) -> &TableName {
+        &self.table
+    }
+
+    pub fn identifier(&self) -> RecordIdentifier {
+        self.identifier
     }
 
     pub fn commit_sequence(&self) -> CommitSequence {

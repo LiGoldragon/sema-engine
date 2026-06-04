@@ -39,13 +39,46 @@ impl RecordKey {
     }
 }
 
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
+#[rkyv(derive(Debug))]
+pub struct RecordIdentifier(u64);
+
+impl RecordIdentifier {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn first() -> Self {
+        Self::new(1)
+    }
+
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+
+    pub const fn next(self) -> Self {
+        Self::new(self.0 + 1)
+    }
+}
+
 pub trait EngineRecord: Clone {
     fn record_key(&self) -> RecordKey;
 }
 
-pub trait EngineStoredRecord:
-    EngineRecord
-    + Archive
+pub trait EngineStoredValue:
+    Archive
     + Clone
     + for<'serialize> RkyvSerialize<
         Strategy<Serializer<AlignedVec, ArenaHandle<'serialize>, Share>, rancor::Error>,
@@ -58,14 +91,31 @@ where
 {
 }
 
-impl<RecordValue> EngineStoredRecord for RecordValue
+impl<RecordValue> EngineStoredValue for RecordValue
 where
-    RecordValue: EngineRecord
-        + Archive
+    RecordValue: Archive
         + Clone
         + for<'serialize> RkyvSerialize<
             Strategy<Serializer<AlignedVec, ArenaHandle<'serialize>, Share>, rancor::Error>,
         >,
+    RecordValue::Archived: RkyvDeserialize<RecordValue, HighDeserializer<rancor::Error>>
+        + for<'validation> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+        >,
+{
+}
+
+pub trait EngineStoredRecord: EngineRecord + EngineStoredValue
+where
+    Self::Archived: RkyvDeserialize<Self, HighDeserializer<rancor::Error>>
+        + for<'validation> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+        >,
+{
+}
+
+impl<RecordValue> EngineStoredRecord for RecordValue where
+    RecordValue: EngineRecord + EngineStoredValue,
     RecordValue::Archived: RkyvDeserialize<RecordValue, HighDeserializer<rancor::Error>>
         + for<'validation> CheckBytes<
             Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,

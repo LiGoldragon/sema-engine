@@ -10,11 +10,12 @@ Sema database-operation execution.
 ## Required Local Reading
 
 1. `ARCHITECTURE.md`
-2. `skills.md`
-3. `/home/li/primary/skills/rust-discipline.md`
-4. `/home/li/primary/skills/rust/storage-and-wire.md`
-5. `/home/li/primary/skills/nix-discipline.md`
-6. `/home/li/primary/skills/jj.md`
+2. `INTENT.md`
+3. `skills.md`
+4. `/home/li/primary/skills/rust-discipline.md`
+5. `/home/li/primary/skills/rust/storage-and-wire.md`
+6. `/home/li/primary/skills/nix-discipline.md`
+7. `/home/li/primary/skills/jj.md`
 
 ## Local Rules
 
@@ -23,9 +24,15 @@ Sema database-operation execution.
   `signal-persona-*` dependencies.
 - `Engine` composes `sema::Sema`; it does not replace the storage
   kernel and does not expose raw redb access.
+- Component daemons consume this crate instead of opening redb directly.
+  redb belongs behind `sema`; component-facing database files use
+  `.sema`.
 - Sema operations enter through `signal-sema` vocabulary. Component
   contracts own their domain-specific public operations and the daemon
   lowers them into engine calls.
+- Prefer improving `sema-engine` when schema-derived components expose a
+  reusable storage need. Do not force every component to hand-roll the
+  same compatibility shim around a mismatched current API.
 - Human text projection belongs at component CLI boundaries, not here.
 - Tests must include architectural-truth witnesses for dependency and
   binary absence, not only behavior tests.
