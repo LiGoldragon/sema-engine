@@ -15,12 +15,12 @@ use crate::log::{CommitLogEntry, CommitLogOperation};
 use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
     Catalog, CommitRequest, DeltaKind, EngineStoredRecord, EngineStoredValue, Error,
-    IdentifiedAssertion, IdentifiedMutationReceipt, IdentifiedQueryPlan, IdentifiedQuerySnapshot,
-    IdentifiedRecord, IdentifiedRetraction, IdentifiedTableDescriptor, IdentifiedTableReference,
-    InitialSnapshot, QueryPlan, QuerySnapshot, RecordIdentifier, Result, Retraction, SequenceRange,
-    SnapshotIdentifier, SubscriptionHandle, SubscriptionIdentifier, SubscriptionReceipt,
-    SubscriptionRegistration, SubscriptionSink, TableDescriptor, TableReference, TableRegistration,
-    WriteOperation,
+    IdentifiedAssertion, IdentifiedMutation, IdentifiedMutationReceipt, IdentifiedQueryPlan,
+    IdentifiedQuerySnapshot, IdentifiedRecord, IdentifiedRetraction, IdentifiedTableDescriptor,
+    IdentifiedTableReference, InitialSnapshot, QueryPlan, QuerySnapshot, RecordIdentifier, Result,
+    Retraction, SequenceRange, SnapshotIdentifier, SubscriptionHandle, SubscriptionIdentifier,
+    SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink, TableDescriptor,
+    TableReference, TableRegistration, WriteOperation,
 };
 
 const CATALOG: sema::Table<&'static str, TableRegistration> =
@@ -207,6 +207,67 @@ impl Engine {
             SemaOperation::Retract,
             *retraction.table().name(),
             retraction.identifier(),
+            commit_sequence,
+            snapshot,
+        ))
+    }
+
+    pub fn mutate_identified<RecordValue>(
+        &self,
+        mutation: IdentifiedMutation<RecordValue>,
+    ) -> Result<IdentifiedMutationReceipt>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        self.ensure_identified_registered(mutation.table())?;
+
+        let Some(_record) = self.storage.read(|transaction| {
+            mutation
+                .table()
+                .sema_table()
+                .get(transaction, mutation.identifier().value())
+        })?
+        else {
+            return Err(self.identified_record_not_found(mutation.table(), mutation.identifier()));
+        };
+
+        let commit_sequence = self.next_commit_sequence()?;
+        let snapshot = self.next_snapshot()?;
+        let entry = CommitLogEntry::single(
+            commit_sequence,
+            snapshot,
+            CommitLogOperation::new(
+                SemaOperation::Mutate,
+                *mutation.table().name(),
+                Some(crate::RecordKey::new(
+                    mutation.identifier().value().to_string(),
+                )),
+            ),
+        );
+        self.storage.write(|transaction| {
+            mutation.table().sema_table().insert(
+                transaction,
+                mutation.identifier().value(),
+                mutation.record(),
+            )?;
+            COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+            COUNTERS.insert(
+                transaction,
+                LATEST_COMMIT_SEQUENCE_KEY,
+                &commit_sequence.value(),
+            )?;
+            COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
+            Ok(())
+        })?;
+
+        Ok(IdentifiedMutationReceipt::new(
+            SemaOperation::Mutate,
+            *mutation.table().name(),
+            mutation.identifier(),
             commit_sequence,
             snapshot,
         ))

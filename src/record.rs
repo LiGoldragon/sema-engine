@@ -114,7 +114,8 @@ where
 {
 }
 
-impl<RecordValue> EngineStoredRecord for RecordValue where
+impl<RecordValue> EngineStoredRecord for RecordValue
+where
     RecordValue: EngineRecord + EngineStoredValue,
     RecordValue::Archived: RkyvDeserialize<RecordValue, HighDeserializer<rancor::Error>>
         + for<'validation> CheckBytes<

@@ -46,6 +46,13 @@ pub struct IdentifiedRetraction<RecordValue> {
     identifier: RecordIdentifier,
 }
 
+#[derive(Debug, Clone)]
+pub struct IdentifiedMutation<RecordValue> {
+    table: IdentifiedTableReference<RecordValue>,
+    identifier: RecordIdentifier,
+    record: RecordValue,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentifiedMutationReceipt {
     operation: SemaOperation,
@@ -118,6 +125,32 @@ impl<RecordValue> IdentifiedRetraction<RecordValue> {
 
     pub fn identifier(&self) -> RecordIdentifier {
         self.identifier
+    }
+}
+
+impl<RecordValue> IdentifiedMutation<RecordValue> {
+    pub fn new(
+        table: IdentifiedTableReference<RecordValue>,
+        identifier: RecordIdentifier,
+        record: RecordValue,
+    ) -> Self {
+        Self {
+            table,
+            identifier,
+            record,
+        }
+    }
+
+    pub fn table(&self) -> &IdentifiedTableReference<RecordValue> {
+        &self.table
+    }
+
+    pub fn identifier(&self) -> RecordIdentifier {
+        self.identifier
+    }
+
+    pub fn record(&self) -> &RecordValue {
+        &self.record
     }
 }
 

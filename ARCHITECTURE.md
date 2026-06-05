@@ -35,6 +35,8 @@ redb calls.
 - Engine-identified record families use `IdentifiedTableDescriptor` /
   `IdentifiedTableReference`; `Engine` allocates durable numeric
   `RecordIdentifier` values and persists the next-identifier counter.
+- Engine-identified record families support `Assert`, `Mutate`, `Retract`,
+  and `Match` while preserving the engine-assigned `RecordIdentifier`.
 - `Assert` writes records through a registered record family.
 - `Assert` rejects records whose key already exists in the table with a
   typed `DuplicateAssertKey` error — `Mutate` is the only replacement
@@ -191,6 +193,7 @@ let entries = engine.register_identified_table(
 
 let receipt = engine.assert_identified(IdentifiedAssertion::new(entries, entry))?;
 let identifier = receipt.identifier();
+engine.mutate_identified(IdentifiedMutation::new(entries, identifier, updated_entry))?;
 let found = engine.match_identified(IdentifiedQueryPlan::identifier(entries, identifier))?;
 engine.retract_identified(IdentifiedRetraction::new(entries, identifier))?;
 ```

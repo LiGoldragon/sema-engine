@@ -18,7 +18,10 @@ forcing components to build compatibility shims. Domain-keyed record
 families use `TableDescriptor` and `EngineRecord::record_key`. Components
 whose schema contract needs engine-assigned numeric identity use
 `IdentifiedTableDescriptor`; the engine allocates `RecordIdentifier`,
-persists the counter, and returns identified receipts and snapshots.
+persists the counter, and returns identified receipts and snapshots. Identified
+families support assert, mutate, retract, and match without forcing components
+to simulate mutation through retract-plus-assert or maintain their own
+identifier-preserving write shim.
 
 Component database files use the `.sema` extension. redb remains an
 implementation detail of the storage kernel, not the component-facing file

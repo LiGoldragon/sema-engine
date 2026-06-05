@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     AggregatePlan, Assertion, CommitRequest, CommitSequence, Engine, EngineOpen, EngineRecord,
-    FieldSelection, IdentifiedAssertion, IdentifiedQueryPlan, IdentifiedRetraction,
-    IdentifiedTableDescriptor, KeyRange, Mutation, QueryPlan, ReadOperator, RecordIdentifier,
-    RecordKey, RecursionMode, Retraction, RuleSetRef, SchemaVersion, SnapshotIdentifier,
-    TableDescriptor, TableName, UnificationPlan,
+    FieldSelection, IdentifiedAssertion, IdentifiedMutation, IdentifiedQueryPlan,
+    IdentifiedRetraction, IdentifiedTableDescriptor, KeyRange, Mutation, QueryPlan, ReadOperator,
+    RecordIdentifier, RecordKey, RecursionMode, Retraction, RuleSetRef, SchemaVersion,
+    SnapshotIdentifier, TableDescriptor, TableName, UnificationPlan,
 };
 use signal_sema::SemaOperation;
 use tempfile::TempDir;
@@ -237,6 +237,57 @@ fn identified_record_counter_survives_reopen_and_retract_advances_sequence() {
         remaining.records()[0].identifier(),
         RecordIdentifier::new(2)
     );
+}
+
+#[test]
+fn engine_mutates_identified_record_without_changing_identifier() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_identified_table(fixture.identified_descriptor())
+        .expect("identified table registers");
+    engine
+        .assert_identified(IdentifiedAssertion::new(
+            records,
+            ToyRecord::new("alpha", "first"),
+        ))
+        .expect("identified assert succeeds");
+
+    let mutation = engine
+        .mutate_identified(IdentifiedMutation::new(
+            records,
+            RecordIdentifier::new(1),
+            ToyRecord::new("alpha", "mutated"),
+        ))
+        .expect("identified mutate succeeds");
+    let updated = engine
+        .match_identified(IdentifiedQueryPlan::identifier(
+            records,
+            RecordIdentifier::new(1),
+        ))
+        .expect("identified match succeeds");
+    let missing_error = engine
+        .mutate_identified(IdentifiedMutation::new(
+            records,
+            RecordIdentifier::new(99),
+            ToyRecord::new("missing", "mutated"),
+        ))
+        .expect_err("missing identified mutate is rejected");
+
+    assert_eq!(mutation.operation(), SemaOperation::Mutate);
+    assert_eq!(mutation.identifier(), RecordIdentifier::new(1));
+    assert_eq!(mutation.commit_sequence(), CommitSequence::new(2));
+    assert_eq!(mutation.snapshot(), SnapshotIdentifier::new(2));
+    assert_eq!(updated.records().len(), 1);
+    assert_eq!(updated.records()[0].identifier(), RecordIdentifier::new(1));
+    assert_eq!(
+        updated.records()[0].value(),
+        &ToyRecord::new("alpha", "mutated")
+    );
+    assert!(matches!(
+        missing_error,
+        sema_engine::Error::RecordNotFound { .. }
+    ));
 }
 
 #[test]
