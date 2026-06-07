@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    AggregatePlan, Assertion, CommitRequest, CommitSequence, Engine, EngineOpen, EngineRecord,
-    FieldSelection, IdentifiedAssertion, IdentifiedMutation, IdentifiedQueryPlan,
+    AggregatePlan, Assertion, CommitRequest, CommitSequence, DatabaseMarker, Engine, EngineOpen,
+    EngineRecord, FieldSelection, IdentifiedAssertion, IdentifiedMutation, IdentifiedQueryPlan,
     IdentifiedRetraction, IdentifiedTableDescriptor, KeyRange, Mutation, QueryPlan, ReadOperator,
     RecordIdentifier, RecordKey, RecursionMode, Retraction, RuleSetRef, SchemaVersion,
     SnapshotIdentifier, TableDescriptor, TableName, UnificationPlan,
@@ -93,6 +93,44 @@ fn engine_executes_assert_and_match_over_registered_record_family() {
     assert_eq!(
         snapshot.records(),
         &[ToyRecord::new("first", "stored through engine")]
+    );
+}
+
+#[test]
+fn match_records_returns_the_database_marker_observed_with_the_rows() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.toy_descriptor())
+        .expect("table registers");
+
+    let first = engine
+        .assert(Assertion::new(records, ToyRecord::new("alpha", "first")))
+        .expect("first assert succeeds");
+    let second = engine
+        .assert(Assertion::new(records, ToyRecord::new("beta", "second")))
+        .expect("second assert succeeds");
+    let snapshot = engine
+        .match_records(QueryPlan::all(records))
+        .expect("match succeeds");
+
+    assert_eq!(
+        first.database_marker(),
+        DatabaseMarker::new(CommitSequence::new(1), SnapshotIdentifier::new(1))
+    );
+    assert_eq!(
+        second.database_marker(),
+        DatabaseMarker::new(CommitSequence::new(2), SnapshotIdentifier::new(2))
+    );
+    assert_eq!(
+        snapshot.database_marker(),
+        DatabaseMarker::new(CommitSequence::new(2), SnapshotIdentifier::new(2))
+    );
+    assert_eq!(
+        engine
+            .current_database_marker()
+            .expect("current marker reads"),
+        snapshot.database_marker()
     );
 }
 
@@ -192,6 +230,32 @@ fn engine_allocates_numeric_identifiers_for_identified_record_family() {
         snapshot.records()[0].value(),
         &ToyRecord::new("another-domain-key", "second identified")
     );
+}
+
+#[test]
+fn identified_match_returns_the_database_marker_observed_with_the_rows() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_identified_table(fixture.identified_descriptor())
+        .expect("identified table registers");
+    let receipt = engine
+        .assert_identified(IdentifiedAssertion::new(
+            records,
+            ToyRecord::new("domain-key", "identified"),
+        ))
+        .expect("identified assert succeeds");
+
+    let snapshot = engine
+        .match_identified(IdentifiedQueryPlan::all(records))
+        .expect("identified match succeeds");
+
+    assert_eq!(
+        receipt.database_marker(),
+        DatabaseMarker::new(CommitSequence::new(1), SnapshotIdentifier::new(1))
+    );
+    assert_eq!(snapshot.database_marker(), receipt.database_marker());
+    assert_eq!(snapshot.records().len(), 1);
 }
 
 #[test]
@@ -360,6 +424,10 @@ fn validate_dry_run_returns_validate_receipt_without_commit_log_write() {
     assert_eq!(receipt.operation(), SemaOperation::Validate);
     assert_eq!(receipt.table().as_str(), "toy_records");
     assert_eq!(receipt.snapshot(), SnapshotIdentifier::new(1));
+    assert_eq!(
+        receipt.database_marker(),
+        DatabaseMarker::new(CommitSequence::new(1), SnapshotIdentifier::new(1))
+    );
     assert_eq!(receipt.record_count(), 1);
     assert_eq!(log_after, log_before);
 }
@@ -415,6 +483,10 @@ fn commit_lands_write_bundle_under_one_snapshot() {
     let log = engine.commit_log().expect("commit log reads");
 
     assert_eq!(receipt.snapshot(), SnapshotIdentifier::new(3));
+    assert_eq!(
+        receipt.database_marker(),
+        DatabaseMarker::new(CommitSequence::new(3), SnapshotIdentifier::new(3))
+    );
     assert_eq!(receipt.commit_sequence(), CommitSequence::new(3));
     assert_eq!(receipt.operation_count(), 3);
     assert_eq!(

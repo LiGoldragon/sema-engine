@@ -655,39 +655,56 @@ impl Engine {
     {
         self.ensure_registered(query.table())?;
 
-        let snapshot = self.latest_snapshot()?;
-        let records = match query.read_plan().node() {
+        let (database_marker, records) = match query.read_plan().node() {
             crate::ReadPlanNode::AllRows => self.storage.read(|transaction| {
-                Ok(query
-                    .table()
-                    .sema_table()
-                    .iter(transaction)?
-                    .into_iter()
-                    .map(|(_key, record)| record)
-                    .collect())
+                Ok((
+                    Self::database_marker_from_values(
+                        COUNTERS.get(transaction, LATEST_COMMIT_SEQUENCE_KEY)?,
+                        COUNTERS.get(transaction, LATEST_SNAPSHOT_KEY)?,
+                    ),
+                    query
+                        .table()
+                        .sema_table()
+                        .iter(transaction)?
+                        .into_iter()
+                        .map(|(_key, record)| record)
+                        .collect(),
+                ))
             })?,
             crate::ReadPlanNode::ByKey(key) => self.storage.read(|transaction| {
-                Ok(query
-                    .table()
-                    .sema_table()
-                    .get(transaction, key.to_owned_string())?
-                    .into_iter()
-                    .collect())
+                Ok((
+                    Self::database_marker_from_values(
+                        COUNTERS.get(transaction, LATEST_COMMIT_SEQUENCE_KEY)?,
+                        COUNTERS.get(transaction, LATEST_SNAPSHOT_KEY)?,
+                    ),
+                    query
+                        .table()
+                        .sema_table()
+                        .get(transaction, key.to_owned_string())?
+                        .into_iter()
+                        .collect(),
+                ))
             })?,
             crate::ReadPlanNode::ByKeyRange(range) => self.storage.read(|transaction| {
-                Ok(query
-                    .table()
-                    .sema_table()
-                    .iter(transaction)?
-                    .into_iter()
-                    .filter_map(|(key, record)| {
-                        if range.contains(&crate::RecordKey::new(key)) {
-                            Some(record)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect())
+                Ok((
+                    Self::database_marker_from_values(
+                        COUNTERS.get(transaction, LATEST_COMMIT_SEQUENCE_KEY)?,
+                        COUNTERS.get(transaction, LATEST_SNAPSHOT_KEY)?,
+                    ),
+                    query
+                        .table()
+                        .sema_table()
+                        .iter(transaction)?
+                        .into_iter()
+                        .filter_map(|(key, record)| {
+                            if range.contains(&crate::RecordKey::new(key)) {
+                                Some(record)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                ))
             })?,
             node => {
                 return Err(Error::UnsupportedReadPlan {
@@ -699,7 +716,7 @@ impl Engine {
         Ok(QuerySnapshot::new(
             SemaOperation::Match,
             *query.table().name(),
-            snapshot,
+            database_marker,
             records,
         ))
     }
@@ -717,46 +734,63 @@ impl Engine {
     {
         self.ensure_identified_registered(query.table())?;
 
-        let snapshot = self.latest_snapshot()?;
-        let records = match query.read_plan().node() {
+        let (database_marker, records) = match query.read_plan().node() {
             crate::IdentifiedReadPlanNode::AllRows => self.storage.read(|transaction| {
-                Ok(query
-                    .table()
-                    .sema_table()
-                    .iter(transaction)?
-                    .into_iter()
-                    .map(|(identifier, record)| {
-                        IdentifiedRecord::new(RecordIdentifier::new(identifier), record)
-                    })
-                    .collect())
-            })?,
-            crate::IdentifiedReadPlanNode::ByIdentifier(identifier) => {
-                self.storage.read(|transaction| {
-                    Ok(query
-                        .table()
-                        .sema_table()
-                        .get(transaction, identifier.value())?
-                        .map(|record| IdentifiedRecord::new(*identifier, record))
-                        .into_iter()
-                        .collect())
-                })?
-            }
-            crate::IdentifiedReadPlanNode::ByIdentifierRange(range) => {
-                self.storage.read(|transaction| {
-                    Ok(query
+                Ok((
+                    Self::database_marker_from_values(
+                        COUNTERS.get(transaction, LATEST_COMMIT_SEQUENCE_KEY)?,
+                        COUNTERS.get(transaction, LATEST_SNAPSHOT_KEY)?,
+                    ),
+                    query
                         .table()
                         .sema_table()
                         .iter(transaction)?
                         .into_iter()
-                        .filter_map(|(identifier, record)| {
-                            let identifier = RecordIdentifier::new(identifier);
-                            if range.contains(identifier) {
-                                Some(IdentifiedRecord::new(identifier, record))
-                            } else {
-                                None
-                            }
+                        .map(|(identifier, record)| {
+                            IdentifiedRecord::new(RecordIdentifier::new(identifier), record)
                         })
-                        .collect())
+                        .collect(),
+                ))
+            })?,
+            crate::IdentifiedReadPlanNode::ByIdentifier(identifier) => {
+                self.storage.read(|transaction| {
+                    Ok((
+                        Self::database_marker_from_values(
+                            COUNTERS.get(transaction, LATEST_COMMIT_SEQUENCE_KEY)?,
+                            COUNTERS.get(transaction, LATEST_SNAPSHOT_KEY)?,
+                        ),
+                        query
+                            .table()
+                            .sema_table()
+                            .get(transaction, identifier.value())?
+                            .map(|record| IdentifiedRecord::new(*identifier, record))
+                            .into_iter()
+                            .collect(),
+                    ))
+                })?
+            }
+            crate::IdentifiedReadPlanNode::ByIdentifierRange(range) => {
+                self.storage.read(|transaction| {
+                    Ok((
+                        Self::database_marker_from_values(
+                            COUNTERS.get(transaction, LATEST_COMMIT_SEQUENCE_KEY)?,
+                            COUNTERS.get(transaction, LATEST_SNAPSHOT_KEY)?,
+                        ),
+                        query
+                            .table()
+                            .sema_table()
+                            .iter(transaction)?
+                            .into_iter()
+                            .filter_map(|(identifier, record)| {
+                                let identifier = RecordIdentifier::new(identifier);
+                                if range.contains(identifier) {
+                                    Some(IdentifiedRecord::new(identifier, record))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect(),
+                    ))
                 })?
             }
         };
@@ -764,7 +798,7 @@ impl Engine {
         Ok(IdentifiedQuerySnapshot::new(
             SemaOperation::Match,
             *query.table().name(),
-            snapshot,
+            database_marker,
             records,
         ))
     }
@@ -785,7 +819,7 @@ impl Engine {
         Ok(crate::ValidationReceipt::new(
             SemaOperation::Validate,
             table,
-            snapshot.snapshot(),
+            snapshot.database_marker(),
             snapshot.records().len(),
         ))
     }
@@ -808,6 +842,15 @@ impl Engine {
                 .unwrap_or_else(crate::CommitSequence::genesis))
         })?;
         Ok(value)
+    }
+
+    pub fn current_database_marker(&self) -> Result<crate::DatabaseMarker> {
+        Ok(self.storage.read(|transaction| {
+            Ok(Self::database_marker_from_values(
+                COUNTERS.get(transaction, LATEST_COMMIT_SEQUENCE_KEY)?,
+                COUNTERS.get(transaction, LATEST_SNAPSHOT_KEY)?,
+            ))
+        })?)
     }
 
     pub fn commit_log(&self) -> Result<Vec<CommitLogEntry>> {
@@ -894,6 +937,20 @@ impl Engine {
 
     fn next_commit_sequence(&self) -> Result<crate::CommitSequence> {
         Ok(self.current_commit_sequence()?.next())
+    }
+
+    fn database_marker_from_values(
+        commit_sequence: Option<u64>,
+        snapshot: Option<u64>,
+    ) -> crate::DatabaseMarker {
+        crate::DatabaseMarker::new(
+            commit_sequence
+                .map(crate::CommitSequence::new)
+                .unwrap_or_else(crate::CommitSequence::genesis),
+            snapshot
+                .map(SnapshotIdentifier::new)
+                .unwrap_or_else(SnapshotIdentifier::genesis),
+        )
     }
 
     fn next_record_identifier<RecordValue>(

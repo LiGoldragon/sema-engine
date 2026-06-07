@@ -24,7 +24,17 @@
           "rust-src"
         ];
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
-        src = craneLib.cleanCargoSource ./.;
+        repoContextFile = path: _type: builtins.elem (baseNameOf path) [
+          "AGENTS.md"
+          "ARCHITECTURE.md"
+          "INTENT.md"
+          "skills.md"
+        ];
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            (craneLib.filterCargoSources path type) || (repoContextFile path type);
+        };
         commonArgs = {
           inherit src;
           strictDeps = true;

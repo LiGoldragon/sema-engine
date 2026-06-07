@@ -1,8 +1,8 @@
 use signal_sema::SemaOperation;
 
 use crate::{
-    CommitSequence, EngineRecord, IdentifiedTableReference, RecordIdentifier, RecordKey,
-    SnapshotIdentifier, TableName, TableReference,
+    CommitSequence, DatabaseMarker, EngineRecord, IdentifiedTableReference, RecordIdentifier,
+    RecordKey, SnapshotIdentifier, TableName, TableReference,
 };
 
 #[derive(Debug, Clone)]
@@ -98,6 +98,10 @@ impl MutationReceipt {
     pub fn snapshot(&self) -> SnapshotIdentifier {
         self.snapshot
     }
+
+    pub fn database_marker(&self) -> DatabaseMarker {
+        DatabaseMarker::new(self.commit_sequence, self.snapshot)
+    }
 }
 
 impl<RecordValue> IdentifiedAssertion<RecordValue> {
@@ -189,6 +193,10 @@ impl IdentifiedMutationReceipt {
 
     pub fn snapshot(&self) -> SnapshotIdentifier {
         self.snapshot
+    }
+
+    pub fn database_marker(&self) -> DatabaseMarker {
+        DatabaseMarker::new(self.commit_sequence, self.snapshot)
     }
 }
 
@@ -352,6 +360,10 @@ impl CommitReceipt {
 
     pub fn snapshot(&self) -> SnapshotIdentifier {
         self.snapshot
+    }
+
+    pub fn database_marker(&self) -> DatabaseMarker {
+        DatabaseMarker::new(self.commit_sequence, self.snapshot)
     }
 
     pub fn operation_count(&self) -> usize {

@@ -5,8 +5,8 @@ use signal_sema::SemaOperation;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use crate::{
-    IdentifiedRecord, IdentifiedTableReference, RecordIdentifier, RecordKey, SnapshotIdentifier,
-    TableName, TableReference,
+    DatabaseMarker, IdentifiedRecord, IdentifiedTableReference, RecordIdentifier, RecordKey,
+    SnapshotIdentifier, TableName, TableReference,
 };
 
 #[derive(Debug, Clone)]
@@ -510,7 +510,7 @@ impl RecursionMode {
 pub struct QuerySnapshot<RecordValue> {
     operation: SemaOperation,
     table: TableName,
-    snapshot: SnapshotIdentifier,
+    database_marker: DatabaseMarker,
     records: Vec<RecordValue>,
 }
 
@@ -518,7 +518,7 @@ pub struct QuerySnapshot<RecordValue> {
 pub struct IdentifiedQuerySnapshot<RecordValue> {
     operation: SemaOperation,
     table: TableName,
-    snapshot: SnapshotIdentifier,
+    database_marker: DatabaseMarker,
     records: Vec<IdentifiedRecord<RecordValue>>,
 }
 
@@ -526,13 +526,13 @@ impl<RecordValue> QuerySnapshot<RecordValue> {
     pub fn new(
         operation: SemaOperation,
         table: TableName,
-        snapshot: SnapshotIdentifier,
+        database_marker: DatabaseMarker,
         records: Vec<RecordValue>,
     ) -> Self {
         Self {
             operation,
             table,
-            snapshot,
+            database_marker,
             records,
         }
     }
@@ -546,7 +546,11 @@ impl<RecordValue> QuerySnapshot<RecordValue> {
     }
 
     pub fn snapshot(&self) -> SnapshotIdentifier {
-        self.snapshot
+        self.database_marker.snapshot()
+    }
+
+    pub fn database_marker(&self) -> DatabaseMarker {
+        self.database_marker
     }
 
     pub fn records(&self) -> &[RecordValue] {
@@ -558,13 +562,13 @@ impl<RecordValue> IdentifiedQuerySnapshot<RecordValue> {
     pub fn new(
         operation: SemaOperation,
         table: TableName,
-        snapshot: SnapshotIdentifier,
+        database_marker: DatabaseMarker,
         records: Vec<IdentifiedRecord<RecordValue>>,
     ) -> Self {
         Self {
             operation,
             table,
-            snapshot,
+            database_marker,
             records,
         }
     }
@@ -578,7 +582,11 @@ impl<RecordValue> IdentifiedQuerySnapshot<RecordValue> {
     }
 
     pub fn snapshot(&self) -> SnapshotIdentifier {
-        self.snapshot
+        self.database_marker.snapshot()
+    }
+
+    pub fn database_marker(&self) -> DatabaseMarker {
+        self.database_marker
     }
 
     pub fn records(&self) -> &[IdentifiedRecord<RecordValue>] {
@@ -594,7 +602,7 @@ impl<RecordValue> IdentifiedQuerySnapshot<RecordValue> {
 pub struct ValidationReceipt {
     operation: SemaOperation,
     table: TableName,
-    snapshot: SnapshotIdentifier,
+    database_marker: DatabaseMarker,
     record_count: usize,
 }
 
@@ -602,13 +610,13 @@ impl ValidationReceipt {
     pub fn new(
         operation: SemaOperation,
         table: TableName,
-        snapshot: SnapshotIdentifier,
+        database_marker: DatabaseMarker,
         record_count: usize,
     ) -> Self {
         Self {
             operation,
             table,
-            snapshot,
+            database_marker,
             record_count,
         }
     }
@@ -622,7 +630,11 @@ impl ValidationReceipt {
     }
 
     pub fn snapshot(&self) -> SnapshotIdentifier {
-        self.snapshot
+        self.database_marker.snapshot()
+    }
+
+    pub fn database_marker(&self) -> DatabaseMarker {
+        self.database_marker
     }
 
     pub fn record_count(&self) -> usize {

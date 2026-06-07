@@ -37,7 +37,7 @@ pub use record::{
 };
 pub use sema::SchemaVersion;
 pub use sequence::CommitSequence;
-pub use snapshot::SnapshotIdentifier;
+pub use snapshot::{DatabaseMarker, SnapshotIdentifier};
 pub use subscribe::{
     DeltaKind, InitialSnapshot, SequenceRange, SinkError, SubscriptionDeliveryFailure,
     SubscriptionDeliveryMode, SubscriptionDelta, SubscriptionEvent, SubscriptionHandle,

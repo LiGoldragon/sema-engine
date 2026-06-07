@@ -23,6 +23,12 @@ families support assert, mutate, retract, and match without forcing components
 to simulate mutation through retract-plus-assert or maintain their own
 identifier-preserving write shim.
 
+Read and write results expose a `DatabaseMarker`: the durable
+`CommitSequence` plus the observed `SnapshotIdentifier`. Read snapshots obtain
+that marker from the same closure-scoped storage read transaction as the rows
+they return, giving component actors one compact handover/replay boundary
+without leaking redb transactions or turning this crate into a runtime.
+
 Component database files use the `.sema` extension. redb remains an
 implementation detail of the storage kernel, not the component-facing file
 type or daemon API.

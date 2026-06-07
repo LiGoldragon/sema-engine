@@ -97,8 +97,14 @@ redb calls.
 - `CommitReceipt` carries the committed `CommitSequence`, `SnapshotIdentifier`, and
   operation count. Single-operation and multi-operation commits return the
   same receipt shape.
-- `QuerySnapshot` carries the latest observed `SnapshotIdentifier`.
-- `ValidationReceipt` carries the observed `SnapshotIdentifier` and record count.
+- `DatabaseMarker` is the compact observed database boundary:
+  `CommitSequence` plus `SnapshotIdentifier`.
+- Write receipts expose their committed `DatabaseMarker`.
+- `QuerySnapshot` carries the `DatabaseMarker` observed from the same
+  closure-scoped read transaction as the returned rows.
+- `IdentifiedQuerySnapshot` carries the same marker shape for
+  engine-identified tables.
+- `ValidationReceipt` carries the observed `DatabaseMarker` and record count.
 - `Validate` does not write commit-log entries.
 - `list_tables` exposes registered table descriptors without exposing
   the mutable catalog.
@@ -163,6 +169,7 @@ engine.commit(
 )?;
 
 let snapshot = engine.match_records(QueryPlan::all(family.clone()))?;
+let marker = snapshot.database_marker();
 let validation = engine.validate(QueryPlan::all(family.clone()))?;
 let _tables = engine.list_tables();
 let _log = engine.commit_log_range(SequenceRange::from(snapshot.snapshot()))?;
