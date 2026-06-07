@@ -17,10 +17,10 @@ use crate::{
     Catalog, CommitRequest, DeltaKind, EngineStoredRecord, EngineStoredValue, Error,
     IdentifiedAssertion, IdentifiedMutation, IdentifiedMutationReceipt, IdentifiedQueryPlan,
     IdentifiedQuerySnapshot, IdentifiedRecord, IdentifiedRetraction, IdentifiedTableDescriptor,
-    IdentifiedTableReference, InitialSnapshot, QueryPlan, QuerySnapshot, RecordIdentifier, Result,
-    Retraction, SequenceRange, SnapshotIdentifier, SubscriptionHandle, SubscriptionIdentifier,
-    SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink, TableDescriptor,
-    TableReference, TableRegistration, WriteOperation,
+    IdentifiedTableReference, InitialSnapshot, KeyedAssertion, KeyedMutation, QueryPlan,
+    QuerySnapshot, RecordIdentifier, Result, Retraction, SequenceRange, SnapshotIdentifier,
+    SubscriptionHandle, SubscriptionIdentifier, SubscriptionReceipt, SubscriptionRegistration,
+    SubscriptionSink, TableDescriptor, TableReference, TableRegistration, WriteOperation,
 };
 
 const CATALOG: sema::Table<&'static str, TableRegistration> =
@@ -284,9 +284,27 @@ impl Engine {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
+        self.assert_keyed(KeyedAssertion::new(
+            *assertion.table(),
+            assertion.record_key(),
+            assertion.record().clone(),
+        ))
+    }
+
+    pub fn assert_keyed<RecordValue>(
+        &self,
+        assertion: KeyedAssertion<RecordValue>,
+    ) -> Result<crate::MutationReceipt>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
         self.ensure_registered(assertion.table())?;
 
-        let key = assertion.record().record_key();
+        let key = assertion.key().clone();
         if self
             .storage
             .read(|transaction| {
@@ -355,9 +373,27 @@ impl Engine {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
+        self.mutate_keyed(KeyedMutation::new(
+            *mutation.table(),
+            mutation.record_key(),
+            mutation.record().clone(),
+        ))
+    }
+
+    pub fn mutate_keyed<RecordValue>(
+        &self,
+        mutation: KeyedMutation<RecordValue>,
+    ) -> Result<crate::MutationReceipt>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
         self.ensure_registered(mutation.table())?;
 
-        let key = mutation.record().record_key();
+        let key = mutation.key().clone();
         if self
             .storage
             .read(|transaction| {
@@ -420,7 +456,7 @@ impl Engine {
         retraction: Retraction<RecordValue>,
     ) -> Result<crate::MutationReceipt>
     where
-        RecordValue: EngineStoredRecord + Send + Sync + 'static,
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
         <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
             + for<'validation> CheckBytes<
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
@@ -647,7 +683,7 @@ impl Engine {
         query: QueryPlan<RecordValue>,
     ) -> Result<QuerySnapshot<RecordValue>>
     where
-        RecordValue: EngineStoredRecord,
+        RecordValue: EngineStoredValue,
         <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
             + for<'validation> CheckBytes<
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
@@ -808,7 +844,7 @@ impl Engine {
         query: QueryPlan<RecordValue>,
     ) -> Result<crate::ValidationReceipt>
     where
-        RecordValue: EngineStoredRecord,
+        RecordValue: EngineStoredValue,
         <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
             + for<'validation> CheckBytes<
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,

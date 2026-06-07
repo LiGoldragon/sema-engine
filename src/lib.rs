@@ -23,8 +23,8 @@ pub use error::{Error, Result};
 pub use log::{CommitLogEntry, CommitLogOperation};
 pub use mutation::{
     Assertion, CommitReceipt, CommitRequest, IdentifiedAssertion, IdentifiedMutation,
-    IdentifiedMutationReceipt, IdentifiedRetraction, Mutation, MutationReceipt, Retraction,
-    WriteOperation,
+    IdentifiedMutationReceipt, IdentifiedRetraction, KeyedAssertion, KeyedMutation, Mutation,
+    MutationReceipt, Retraction, WriteOperation,
 };
 pub use query::{
     AggregatePlan, FieldSelection, IdentifiedQueryPlan, IdentifiedQuerySnapshot,

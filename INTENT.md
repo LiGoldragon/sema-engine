@@ -15,8 +15,11 @@ observation.
 
 The engine surface should follow the architecture of its users instead of
 forcing components to build compatibility shims. Domain-keyed record
-families use `TableDescriptor` and `EngineRecord::record_key`. Components
-whose schema contract needs engine-assigned numeric identity use
+families use `TableDescriptor` and either `EngineRecord::record_key` when
+the record type is local, or explicit-key `KeyedAssertion` /
+`KeyedMutation` when the component stores imported schema/contract record
+types it cannot legally implement external traits for. Components whose
+schema contract needs engine-assigned numeric identity use
 `IdentifiedTableDescriptor`; the engine allocates `RecordIdentifier`,
 persists the counter, and returns identified receipts and snapshots. Identified
 families support assert, mutate, retract, and match without forcing components

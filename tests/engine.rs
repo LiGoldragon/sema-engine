@@ -4,9 +4,9 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     AggregatePlan, Assertion, CommitRequest, CommitSequence, DatabaseMarker, Engine, EngineOpen,
     EngineRecord, FieldSelection, IdentifiedAssertion, IdentifiedMutation, IdentifiedQueryPlan,
-    IdentifiedRetraction, IdentifiedTableDescriptor, KeyRange, Mutation, QueryPlan, ReadOperator,
-    RecordIdentifier, RecordKey, RecursionMode, Retraction, RuleSetRef, SchemaVersion,
-    SnapshotIdentifier, TableDescriptor, TableName, UnificationPlan,
+    IdentifiedRetraction, IdentifiedTableDescriptor, KeyRange, KeyedAssertion, KeyedMutation,
+    Mutation, QueryPlan, ReadOperator, RecordIdentifier, RecordKey, RecursionMode, Retraction,
+    RuleSetRef, SchemaVersion, SnapshotIdentifier, TableDescriptor, TableName, UnificationPlan,
 };
 use signal_sema::SemaOperation;
 use tempfile::TempDir;
@@ -30,6 +30,22 @@ impl ToyRecord {
 impl EngineRecord for ToyRecord {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.key.clone())
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+struct ImportedContractRecord {
+    name: String,
+    payload: String,
+}
+
+impl ImportedContractRecord {
+    fn new(name: impl Into<String>, payload: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            payload: payload.into(),
+        }
     }
 }
 
@@ -59,6 +75,10 @@ impl EngineFixture {
 
     fn identified_descriptor(&self) -> IdentifiedTableDescriptor<ToyRecord> {
         IdentifiedTableDescriptor::new(TableName::new("identified_toy_records"))
+    }
+
+    fn imported_descriptor(&self) -> TableDescriptor<ImportedContractRecord> {
+        TableDescriptor::new(TableName::new("imported_contract_records"))
     }
 }
 
@@ -93,6 +113,53 @@ fn engine_executes_assert_and_match_over_registered_record_family() {
     assert_eq!(
         snapshot.records(),
         &[ToyRecord::new("first", "stored through engine")]
+    );
+}
+
+#[test]
+fn engine_accepts_explicit_keys_for_imported_record_types() {
+    let fixture = EngineFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.imported_descriptor())
+        .expect("table registers");
+
+    let asserted = engine
+        .assert_keyed(KeyedAssertion::new(
+            records,
+            RecordKey::new("terminal-alpha"),
+            ImportedContractRecord::new("alpha", "from signal-terminal"),
+        ))
+        .expect("explicit-key assert succeeds");
+    let matched = engine
+        .match_records(QueryPlan::key(records, RecordKey::new("terminal-alpha")))
+        .expect("explicit-key match succeeds");
+
+    assert_eq!(asserted.operation(), SemaOperation::Assert);
+    assert_eq!(asserted.key().as_str(), "terminal-alpha");
+    assert_eq!(
+        matched.records(),
+        &[ImportedContractRecord::new("alpha", "from signal-terminal")]
+    );
+
+    let mutated = engine
+        .mutate_keyed(KeyedMutation::new(
+            records,
+            RecordKey::new("terminal-alpha"),
+            ImportedContractRecord::new("alpha", "updated"),
+        ))
+        .expect("explicit-key mutate succeeds");
+    let retracted = engine
+        .retract(Retraction::new(records, RecordKey::new("terminal-alpha")))
+        .expect("explicit-key retract succeeds");
+
+    assert_eq!(mutated.operation(), SemaOperation::Mutate);
+    assert_eq!(retracted.operation(), SemaOperation::Retract);
+    assert_eq!(
+        engine
+            .current_commit_sequence()
+            .expect("commit sequence reads"),
+        CommitSequence::new(3)
     );
 }
 

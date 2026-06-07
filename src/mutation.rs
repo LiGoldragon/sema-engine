@@ -11,6 +11,13 @@ pub struct Assertion<RecordValue> {
     record: RecordValue,
 }
 
+#[derive(Debug, Clone)]
+pub struct KeyedAssertion<RecordValue> {
+    table: TableReference<RecordValue>,
+    key: RecordKey,
+    record: RecordValue,
+}
+
 impl<RecordValue> Assertion<RecordValue> {
     pub fn new(table: TableReference<RecordValue>, record: RecordValue) -> Self {
         Self { table, record }
@@ -18,6 +25,24 @@ impl<RecordValue> Assertion<RecordValue> {
 
     pub fn table(&self) -> &TableReference<RecordValue> {
         &self.table
+    }
+
+    pub fn record(&self) -> &RecordValue {
+        &self.record
+    }
+}
+
+impl<RecordValue> KeyedAssertion<RecordValue> {
+    pub fn new(table: TableReference<RecordValue>, key: RecordKey, record: RecordValue) -> Self {
+        Self { table, key, record }
+    }
+
+    pub fn table(&self) -> &TableReference<RecordValue> {
+        &self.table
+    }
+
+    pub fn key(&self) -> &RecordKey {
+        &self.key
     }
 
     pub fn record(&self) -> &RecordValue {
@@ -215,6 +240,13 @@ pub struct Mutation<RecordValue> {
     record: RecordValue,
 }
 
+#[derive(Debug, Clone)]
+pub struct KeyedMutation<RecordValue> {
+    table: TableReference<RecordValue>,
+    key: RecordKey,
+    record: RecordValue,
+}
+
 impl<RecordValue> Mutation<RecordValue> {
     pub fn new(table: TableReference<RecordValue>, record: RecordValue) -> Self {
         Self { table, record }
@@ -222,6 +254,24 @@ impl<RecordValue> Mutation<RecordValue> {
 
     pub fn table(&self) -> &TableReference<RecordValue> {
         &self.table
+    }
+
+    pub fn record(&self) -> &RecordValue {
+        &self.record
+    }
+}
+
+impl<RecordValue> KeyedMutation<RecordValue> {
+    pub fn new(table: TableReference<RecordValue>, key: RecordKey, record: RecordValue) -> Self {
+        Self { table, key, record }
+    }
+
+    pub fn table(&self) -> &TableReference<RecordValue> {
+        &self.table
+    }
+
+    pub fn key(&self) -> &RecordKey {
+        &self.key
     }
 
     pub fn record(&self) -> &RecordValue {

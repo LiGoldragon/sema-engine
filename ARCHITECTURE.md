@@ -31,7 +31,9 @@ redb calls.
   handle to the same `.sema` file.
 - `Engine` registers record families before executing database operations.
 - Domain-keyed record families use `TableDescriptor` /
-  `TableReference` and record-provided `RecordKey` values.
+  `TableReference` and either record-provided `RecordKey` values
+  (`EngineRecord`) or explicit keys (`KeyedAssertion` /
+  `KeyedMutation`) for imported schema/contract record types.
 - Engine-identified record families use `IdentifiedTableDescriptor` /
   `IdentifiedTableReference`; `Engine` allocates durable numeric
   `RecordIdentifier` values and persists the next-identifier counter.
@@ -157,6 +159,13 @@ let family = engine.register_table(TableDescriptor::new(TableName::new("thoughts
 engine.assert(Assertion::new(family.clone(), new_thought))?;
 engine.mutate(Mutation::new(family.clone(), updated_thought))?;
 engine.retract(Retraction::new(family.clone(), retired_key))?;
+
+// Imported contract/schema record types cannot implement this crate's
+// EngineRecord trait in the consuming component because of Rust's orphan
+// rules. Those consumers supply the key explicitly without wrapping the
+// imported record in a local storage duplicate.
+engine.assert_keyed(KeyedAssertion::new(family.clone(), RecordKey::new("alpha"), imported))?;
+engine.mutate_keyed(KeyedMutation::new(family.clone(), RecordKey::new("alpha"), updated))?;
 
 // Multi-operation commit: atomic by commit structure, not a separate operation.
 // Each consumer maps its typed public contract request into per-variant
