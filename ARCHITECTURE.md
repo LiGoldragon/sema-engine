@@ -29,6 +29,9 @@ redb calls.
 - Consumers that still have unmigrated component-local tables use
   `Engine::storage_kernel()` rather than opening a second `sema::Sema`
   handle to the same `.sema` file.
+- Unmigrated component-local table reducers use the public
+  `StorageWriteTransaction` alias. Component crates do not depend on
+  `redb` directly just to name the transaction type.
 - `Engine` registers record families before executing database operations.
 - Domain-keyed record families use `TableDescriptor` /
   `TableReference` and either record-provided `RecordKey` values

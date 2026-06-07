@@ -32,6 +32,12 @@ that marker from the same closure-scoped storage read transaction as the rows
 they return, giving component actors one compact handover/replay boundary
 without leaking redb transactions or turning this crate into a runtime.
 
+Consumers that still have component-local tables during migration receive
+storage-kernel transaction types from `sema-engine` instead of depending on
+redb directly. The handoff is transitional: it keeps the daemon's dependency
+surface on the SEMA boundary while those local tables are lifted into engine
+record families.
+
 Component database files use the `.sema` extension. redb remains an
 implementation detail of the storage kernel, not the component-facing file
 type or daemon API.

@@ -38,6 +38,7 @@ pub use record::{
 pub use sema::{
     Error as StorageKernelError, Result as StorageKernelResult, SchemaVersion,
     Sema as StorageKernel, Table as StorageKernelTable,
+    WriteTransaction as StorageWriteTransaction,
 };
 pub use sequence::CommitSequence;
 pub use snapshot::{DatabaseMarker, SnapshotIdentifier};
