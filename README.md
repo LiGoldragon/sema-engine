@@ -1,15 +1,15 @@
 # sema-engine
 
-`sema-engine` is the full database engine library over `sema` and
-`signal-core`. It executes typed database verbs over component-owned
+`sema-engine` is the full database engine library over `sema`,
+`signal-frame`, and `signal-sema`. It executes typed database verbs over component-owned
 `.sema` files.
 
 It is library-only: no daemon, no actors, no sockets, no NOTA parser,
 and no Persona-specific contract dependencies.
 
 Current implemented surface: registered record families and the six
-SignalVerb roots `Assert`, `Mutate`, `Retract`, `Match`, `Subscribe`,
-`Validate`. Multi-operation atomicity is structural — `Engine::commit`
+`signal-sema` operation classes `Assert`, `Mutate`, `Retract`, `Match`,
+`Subscribe`, and `Validate`. Multi-operation atomicity is structural — `Engine::commit`
 takes a typed `CommitRequest<RecordValue>` (a non-empty sequence of
 `WriteOperation`s for one registered table) and lands it under a single
 `SnapshotIdentifier` with one `CommitLogEntry`. Typed `ReadPlan` vocabulary,

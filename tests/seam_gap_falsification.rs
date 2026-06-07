@@ -1,5 +1,5 @@
 //! Falsification tests for the gaps named in
-//! `~/primary/reports/second-operator-assistant/2-signal-core-sema-engine-fit-audit-2026-05-17.md` §4.
+//! the May 17 sema-engine fit audit.
 //!
 //! Each test tries to disprove a claimed gap by composing existing
 //! `Engine` API. The criterion: **the composition must be

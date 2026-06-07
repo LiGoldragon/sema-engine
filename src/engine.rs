@@ -8,7 +8,7 @@ use rkyv::validation::Validator;
 use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use sema::{Schema, SchemaVersion};
-use signal_core::NonEmpty;
+use signal_frame::NonEmpty;
 use signal_sema::SemaOperation;
 
 use crate::log::{CommitLogEntry, CommitLogOperation};
