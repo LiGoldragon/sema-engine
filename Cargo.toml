@@ -1,6 +1,6 @@
 [package]
 name         = "sema-engine"
-version      = "0.2.0"
+version      = "0.2.1"
 edition      = "2024"
 rust-version = "1.85"
 license      = "MIT OR Apache-2.0"
@@ -14,7 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
-sema = { git = "https://github.com/LiGoldragon/sema.git" }
+sema = { git = "https://github.com/LiGoldragon/sema.git", branch = "main" }
 signal-frame = { git = "https://github.com/LiGoldragon/signal-frame.git", branch = "main" }
 signal-sema = { git = "https://github.com/LiGoldragon/signal-sema.git", branch = "main" }
 thiserror = "2"

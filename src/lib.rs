@@ -35,7 +35,10 @@ pub use query::{
 pub use record::{
     EngineRecord, EngineStoredRecord, EngineStoredValue, RecordIdentifier, RecordKey,
 };
-pub use sema::SchemaVersion;
+pub use sema::{
+    Error as StorageKernelError, Result as StorageKernelResult, SchemaVersion,
+    Sema as StorageKernel, Table as StorageKernelTable,
+};
 pub use sequence::CommitSequence;
 pub use snapshot::{DatabaseMarker, SnapshotIdentifier};
 pub use subscribe::{
