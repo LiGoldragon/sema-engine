@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use signal_sema::SemaOperation;
 
@@ -20,6 +21,21 @@ impl RepositoryFixture {
 
     fn has_file(&self, path: impl AsRef<Path>) -> bool {
         self.root.join(path).exists()
+    }
+
+    fn cargo_tree(&self, arguments: &[&str]) -> String {
+        let output = Command::new(env!("CARGO"))
+            .arg("tree")
+            .args(arguments)
+            .current_dir(&self.root)
+            .output()
+            .expect("cargo tree runs");
+        assert!(
+            output.status.success(),
+            "cargo tree failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("cargo tree output is UTF-8")
     }
 }
 
@@ -60,6 +76,17 @@ fn sema_engine_has_no_runtime_or_text_dependencies() {
             "Cargo.toml must not contain {forbidden}"
         );
     }
+}
+
+#[test]
+fn sema_engine_normal_dependency_tree_has_no_nota_next() {
+    let fixture = RepositoryFixture::current();
+    let tree = fixture.cargo_tree(&["--edges", "normal", "--no-default-features"]);
+
+    assert!(
+        !tree.contains("nota-next") && !tree.contains("nota_next"),
+        "sema-engine normal dependency tree must not contain nota-next:\n{tree}"
+    );
 }
 
 #[test]

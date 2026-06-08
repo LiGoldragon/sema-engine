@@ -228,25 +228,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nota-next"
-version = "0.3.0"
-source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#ae5c25cd42b65512be941b274922c9e17bf67176"
-dependencies = [
- "nota-next-derive",
- "rkyv",
-]
-
-[[package]]
-name = "nota-next-derive"
-version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#ae5c25cd42b65512be941b274922c9e17bf67176"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -406,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "sema-engine"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "rkyv",
  "sema",
@@ -466,10 +447,9 @@ dependencies = [
 
 [[package]]
 name = "signal-frame"
-version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-frame.git?branch=main#73305052bb2d1e8b601d604adf8fb86ebe2c0582"
+version = "0.2.0"
+source = "git+https://github.com/LiGoldragon/signal-frame.git?branch=main#440daddc9c4e4261785438a1745605c3a747471b"
 dependencies = [
- "nota-next",
  "paste",
  "rkyv",
  "signal-frame-macros",
@@ -479,7 +459,7 @@ dependencies = [
 [[package]]
 name = "signal-frame-macros"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-frame.git?branch=main#73305052bb2d1e8b601d604adf8fb86ebe2c0582"
+source = "git+https://github.com/LiGoldragon/signal-frame.git?branch=main#440daddc9c4e4261785438a1745605c3a747471b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -488,10 +468,9 @@ dependencies = [
 
 [[package]]
 name = "signal-sema"
-version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-sema.git?branch=main#4f75d1c31b7481e3f212e1885b98939a5172ce1a"
+version = "0.2.0"
+source = "git+https://github.com/LiGoldragon/signal-sema.git?branch=main#33f62840678530289e9b96485453f7d86e343182"
 dependencies = [
- "nota-next",
  "rkyv",
  "thiserror",
 ]
