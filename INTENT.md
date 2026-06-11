@@ -13,6 +13,15 @@ executes writes and reads, owns the durable `CommitSequence`, records the
 commit log, and supplies replay/subscription surfaces for handover and
 observation.
 
+When a component opts in with a `VersioningPolicy`, `sema-engine` also
+records a payload-bearing, hash-linked versioned commit log inside the
+same `.sema` file and the same write transaction as the data write. That
+log is the shared substrate for reusable SEMA-state versioning and
+backup: components configure store identity and schema hash once instead
+of reimplementing their own component-local durability journals. Remote
+transport, acknowledgement policy, and server storage remain outside this
+library-only crate.
+
 The engine surface should follow the architecture of its users instead of
 forcing components to build compatibility shims. Domain-keyed record
 families use `TableDescriptor` and either `EngineRecord::record_key` when

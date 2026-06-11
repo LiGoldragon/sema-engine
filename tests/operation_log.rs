@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize, rancor};
 use sema_engine::{
     Assertion, CommitRequest, CommitSequence, Engine, EngineOpen, EngineRecord, QueryPlan,
-    RecordKey, SchemaVersion, SnapshotIdentifier, TableDescriptor, TableName,
+    RecordKey, Retraction, SchemaHash, SchemaVersion, SnapshotIdentifier, TableDescriptor,
+    TableName, VersionedPayload, VersionedStoreName, VersioningPolicy,
 };
 use signal_sema::SemaOperation;
 use tempfile::TempDir;
@@ -50,8 +51,27 @@ impl LogFixture {
             .expect("engine opens")
     }
 
+    fn open_versioned_engine(&self) -> Engine {
+        Engine::open(
+            EngineOpen::new(self.database_path(), SchemaVersion::new(1)).with_versioning(
+                VersioningPolicy::new(
+                    VersionedStoreName::new("operation-log-fixture"),
+                    SchemaHash::for_label("operation-log-v1"),
+                ),
+            ),
+        )
+        .expect("versioned engine opens")
+    }
+
     fn descriptor(&self) -> TableDescriptor<LoggedRecord> {
         TableDescriptor::new(TableName::new("logged_records"))
+    }
+
+    fn decode_payload(&self, payload: &VersionedPayload) -> LoggedRecord {
+        rkyv::from_bytes::<LoggedRecord, rancor::Error>(
+            payload.bytes().expect("payload carries record bytes"),
+        )
+        .expect("payload decodes")
     }
 }
 
@@ -125,6 +145,115 @@ fn commit_log_and_snapshot_cursor_survive_reopen() {
     assert_eq!(
         reopened.latest_snapshot().unwrap(),
         SnapshotIdentifier::new(2)
+    );
+}
+
+#[test]
+fn versioned_commit_log_is_opt_in() {
+    let fixture = LogFixture::new();
+    let mut engine = fixture.open_engine();
+    let records = engine
+        .register_table(fixture.descriptor())
+        .expect("table registers");
+    engine
+        .assert(Assertion::new(records, LoggedRecord::new("alpha", "first")))
+        .expect("assert succeeds");
+
+    assert_eq!(engine.commit_log().expect("commit log reads").len(), 1);
+    assert!(
+        engine
+            .versioned_commit_log()
+            .expect("versioned commit log reads")
+            .is_empty(),
+        "default engine open must not emit payload-bearing version entries"
+    );
+}
+
+#[test]
+fn versioned_commit_log_carries_payloads_and_digest_chain() {
+    let fixture = LogFixture::new();
+    {
+        let mut engine = fixture.open_versioned_engine();
+        let records = engine
+            .register_table(fixture.descriptor())
+            .expect("table registers");
+
+        engine
+            .assert(Assertion::new(records, LoggedRecord::new("alpha", "first")))
+            .expect("assert succeeds");
+        engine
+            .retract(Retraction::new(records, RecordKey::new("alpha")))
+            .expect("retract succeeds");
+    }
+
+    let engine = fixture.open_versioned_engine();
+    let log = engine
+        .versioned_commit_log()
+        .expect("versioned commit log reads");
+    let tail = engine
+        .versioned_replay_from_sequence(CommitSequence::new(2))
+        .expect("versioned replay tail reads");
+    assert_eq!(log.len(), 2);
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0].commit_sequence(), CommitSequence::new(2));
+    assert_eq!(log[0].store_name().as_str(), "operation-log-fixture");
+    assert_eq!(
+        log[0].schema_hash(),
+        SchemaHash::for_label("operation-log-v1")
+    );
+    assert_eq!(log[0].commit_sequence(), CommitSequence::new(1));
+    assert_eq!(log[0].snapshot(), SnapshotIdentifier::new(1));
+    assert_eq!(log[0].previous_entry_digest(), None);
+    assert_eq!(log[1].previous_entry_digest(), Some(log[0].entry_digest()));
+    assert_ne!(log[0].entry_digest(), log[1].entry_digest());
+
+    let first_operation = log[0].operations().head();
+    assert_eq!(first_operation.operation(), SemaOperation::Assert);
+    assert_eq!(first_operation.table_name(), "logged_records");
+    assert_eq!(first_operation.key().map(RecordKey::as_str), Some("alpha"));
+    assert_eq!(
+        fixture.decode_payload(first_operation.payload()),
+        LoggedRecord::new("alpha", "first")
+    );
+
+    let second_operation = log[1].operations().head();
+    assert_eq!(second_operation.operation(), SemaOperation::Retract);
+    assert_eq!(second_operation.key().map(RecordKey::as_str), Some("alpha"));
+    assert!(second_operation.payload().is_tombstone());
+}
+
+#[test]
+fn versioned_commit_log_preserves_atomic_operation_bundle() {
+    let fixture = LogFixture::new();
+    let mut engine = fixture.open_versioned_engine();
+    let records = engine
+        .register_table(fixture.descriptor())
+        .expect("table registers");
+
+    engine
+        .commit(
+            CommitRequest::new(records)
+                .assert(LoggedRecord::new("alpha", "first"))
+                .assert(LoggedRecord::new("beta", "second")),
+        )
+        .expect("commit succeeds");
+
+    let log = engine
+        .versioned_commit_log()
+        .expect("versioned commit log reads");
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].operation_count(), 2);
+    assert_eq!(
+        log[0].operations().head().key().map(RecordKey::as_str),
+        Some("alpha")
+    );
+    assert_eq!(
+        log[0].operations().tail()[0].key().map(RecordKey::as_str),
+        Some("beta")
+    );
+    assert_eq!(
+        fixture.decode_payload(log[0].operations().tail()[0].payload()),
+        LoggedRecord::new("beta", "second")
     );
 }
 

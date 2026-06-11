@@ -20,7 +20,9 @@ use crate::{
     IdentifiedTableReference, InitialSnapshot, KeyedAssertion, KeyedMutation, QueryPlan,
     QuerySnapshot, RecordIdentifier, Result, Retraction, SequenceRange, SnapshotIdentifier,
     SubscriptionHandle, SubscriptionIdentifier, SubscriptionReceipt, SubscriptionRegistration,
-    SubscriptionSink, TableDescriptor, TableReference, TableRegistration, WriteOperation,
+    SubscriptionSink, TableDescriptor, TableName, TableReference, TableRegistration,
+    VersionedCommitLogEntry, VersionedLogOperation, VersionedPayload, VersioningPolicy,
+    WriteOperation,
 };
 
 const CATALOG: sema::Table<&'static str, TableRegistration> =
@@ -30,6 +32,8 @@ const LATEST_COMMIT_SEQUENCE_KEY: &str = "latest_commit_sequence";
 const LATEST_SNAPSHOT_KEY: &str = "latest_snapshot";
 const NEXT_SUBSCRIPTION_KEY: &str = "next_subscription";
 const COMMIT_LOG: sema::Table<u64, CommitLogEntry> = sema::Table::new("__sema_engine_commit_log");
+const VERSIONED_COMMIT_LOG: sema::Table<u64, VersionedCommitLogEntry> =
+    sema::Table::new("__sema_engine_versioned_commit_log");
 const SUBSCRIPTIONS: sema::Table<u64, SubscriptionRegistration> =
     sema::Table::new("__sema_engine_subscriptions");
 const IDENTIFIED_COUNTERS: sema::Table<String, u64> =
@@ -39,6 +43,7 @@ pub struct Engine {
     storage: sema::Sema,
     catalog: Catalog,
     subscriptions: SubscriptionRegistry,
+    versioning_policy: Option<VersioningPolicy>,
 }
 
 impl Engine {
@@ -54,6 +59,7 @@ impl Engine {
             storage,
             catalog,
             subscriptions: SubscriptionRegistry::new(),
+            versioning_policy: request.versioning_policy().cloned(),
         })
     }
 
@@ -107,15 +113,24 @@ impl Engine {
         let identifier = self.next_record_identifier(assertion.table())?;
         let commit_sequence = self.next_commit_sequence()?;
         let snapshot = self.next_snapshot()?;
+        let key = crate::RecordKey::new(identifier.value().to_string());
         let entry = CommitLogEntry::single(
             commit_sequence,
             snapshot,
             CommitLogOperation::new(
                 SemaOperation::Assert,
                 *assertion.table().name(),
-                Some(crate::RecordKey::new(identifier.value().to_string())),
+                Some(key.clone()),
             ),
         );
+        let versioned_entry = self.versioned_record_entry(
+            commit_sequence,
+            snapshot,
+            SemaOperation::Assert,
+            *assertion.table().name(),
+            Some(key),
+            assertion.record(),
+        )?;
         let counter_key = assertion.table().name().identified_counter_key();
         self.storage.write(|transaction| {
             assertion.table().sema_table().insert(
@@ -124,6 +139,7 @@ impl Engine {
                 assertion.record(),
             )?;
             COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+            self.insert_versioned_entry(transaction, &versioned_entry)?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -170,17 +186,23 @@ impl Engine {
 
         let commit_sequence = self.next_commit_sequence()?;
         let snapshot = self.next_snapshot()?;
+        let key = crate::RecordKey::new(retraction.identifier().value().to_string());
         let entry = CommitLogEntry::single(
             commit_sequence,
             snapshot,
             CommitLogOperation::new(
                 SemaOperation::Retract,
                 *retraction.table().name(),
-                Some(crate::RecordKey::new(
-                    retraction.identifier().value().to_string(),
-                )),
+                Some(key.clone()),
             ),
         );
+        let versioned_entry = self.versioned_tombstone_entry(
+            commit_sequence,
+            snapshot,
+            SemaOperation::Retract,
+            *retraction.table().name(),
+            Some(key),
+        )?;
         let removed = self.storage.write(|transaction| {
             let removed = retraction
                 .table()
@@ -188,6 +210,7 @@ impl Engine {
                 .remove(transaction, retraction.identifier().value())?;
             if removed {
                 COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+                self.insert_versioned_entry(transaction, &versioned_entry)?;
                 COUNTERS.insert(
                     transaction,
                     LATEST_COMMIT_SEQUENCE_KEY,
@@ -237,17 +260,24 @@ impl Engine {
 
         let commit_sequence = self.next_commit_sequence()?;
         let snapshot = self.next_snapshot()?;
+        let key = crate::RecordKey::new(mutation.identifier().value().to_string());
         let entry = CommitLogEntry::single(
             commit_sequence,
             snapshot,
             CommitLogOperation::new(
                 SemaOperation::Mutate,
                 *mutation.table().name(),
-                Some(crate::RecordKey::new(
-                    mutation.identifier().value().to_string(),
-                )),
+                Some(key.clone()),
             ),
         );
+        let versioned_entry = self.versioned_record_entry(
+            commit_sequence,
+            snapshot,
+            SemaOperation::Mutate,
+            *mutation.table().name(),
+            Some(key),
+            mutation.record(),
+        )?;
         self.storage.write(|transaction| {
             mutation.table().sema_table().insert(
                 transaction,
@@ -255,6 +285,7 @@ impl Engine {
                 mutation.record(),
             )?;
             COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+            self.insert_versioned_entry(transaction, &versioned_entry)?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -330,6 +361,14 @@ impl Engine {
                 Some(key.clone()),
             ),
         );
+        let versioned_entry = self.versioned_record_entry(
+            commit_sequence,
+            snapshot,
+            SemaOperation::Assert,
+            *assertion.table().name(),
+            Some(key.clone()),
+            assertion.record(),
+        )?;
         self.storage.write(|transaction| {
             assertion.table().sema_table().insert(
                 transaction,
@@ -337,6 +376,7 @@ impl Engine {
                 assertion.record(),
             )?;
             COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+            self.insert_versioned_entry(transaction, &versioned_entry)?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -419,6 +459,14 @@ impl Engine {
                 Some(key.clone()),
             ),
         );
+        let versioned_entry = self.versioned_record_entry(
+            commit_sequence,
+            snapshot,
+            SemaOperation::Mutate,
+            *mutation.table().name(),
+            Some(key.clone()),
+            mutation.record(),
+        )?;
         self.storage.write(|transaction| {
             mutation.table().sema_table().insert(
                 transaction,
@@ -426,6 +474,7 @@ impl Engine {
                 mutation.record(),
             )?;
             COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+            self.insert_versioned_entry(transaction, &versioned_entry)?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -486,6 +535,13 @@ impl Engine {
                 Some(key.clone()),
             ),
         );
+        let versioned_entry = self.versioned_tombstone_entry(
+            commit_sequence,
+            snapshot,
+            SemaOperation::Retract,
+            *retraction.table().name(),
+            Some(key.clone()),
+        )?;
         let removed = self.storage.write(|transaction| {
             let removed = retraction
                 .table()
@@ -493,6 +549,7 @@ impl Engine {
                 .remove(transaction, key.to_owned_string())?;
             if removed {
                 COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+                self.insert_versioned_entry(transaction, &versioned_entry)?;
                 COUNTERS.insert(
                     transaction,
                     LATEST_COMMIT_SEQUENCE_KEY,
@@ -546,6 +603,7 @@ impl Engine {
         let mut effect_keys = HashSet::new();
         let mut effects = Vec::new();
         let mut log_operations = Vec::with_capacity(request.operation_count());
+        let mut versioned_operations = Vec::with_capacity(request.operation_count());
         for operation in request.operations() {
             match operation {
                 WriteOperation::Assert(record) => {
@@ -570,6 +628,14 @@ impl Engine {
                         *request.table().name(),
                         Some(key.clone()),
                     ));
+                    if self.versioning_policy.is_some() {
+                        versioned_operations.push(VersionedLogOperation::new(
+                            SemaOperation::Assert,
+                            *request.table().name(),
+                            Some(key.clone()),
+                            self.versioned_record_payload(*request.table().name(), record)?,
+                        ));
+                    }
                     effects.push(CommittedEffect::new(DeltaKind::Assert, key, record.clone()));
                 }
                 WriteOperation::Mutate(record) => {
@@ -594,6 +660,14 @@ impl Engine {
                         *request.table().name(),
                         Some(key.clone()),
                     ));
+                    if self.versioning_policy.is_some() {
+                        versioned_operations.push(VersionedLogOperation::new(
+                            SemaOperation::Mutate,
+                            *request.table().name(),
+                            Some(key.clone()),
+                            self.versioned_record_payload(*request.table().name(), record)?,
+                        ));
+                    }
                     effects.push(CommittedEffect::new(DeltaKind::Mutate, key, record.clone()));
                 }
                 WriteOperation::Retract(key) => {
@@ -614,6 +688,14 @@ impl Engine {
                         *request.table().name(),
                         Some(key.clone()),
                     ));
+                    if self.versioning_policy.is_some() {
+                        versioned_operations.push(VersionedLogOperation::new(
+                            SemaOperation::Retract,
+                            *request.table().name(),
+                            Some(key.clone()),
+                            VersionedPayload::tombstone(),
+                        ));
+                    }
                     effects.push(CommittedEffect::new(
                         DeltaKind::Retract,
                         key.clone(),
@@ -632,6 +714,17 @@ impl Engine {
                 table: request.table().name().as_str().to_owned(),
             })?,
         );
+        let versioned_entry = if self.versioning_policy.is_some() {
+            self.versioned_entry(
+                commit_sequence,
+                snapshot,
+                NonEmpty::try_from_vec(versioned_operations).map_err(|_| Error::EmptyCommit {
+                    table: request.table().name().as_str().to_owned(),
+                })?,
+            )?
+        } else {
+            None
+        };
         self.storage.write(|transaction| {
             for operation in request.operations() {
                 match operation {
@@ -651,6 +744,7 @@ impl Engine {
                 }
             }
             COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
+            self.insert_versioned_entry(transaction, &versioned_entry)?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -898,12 +992,32 @@ impl Engine {
             .collect())
     }
 
+    pub fn versioned_commit_log(&self) -> Result<Vec<VersionedCommitLogEntry>> {
+        Ok(self
+            .storage
+            .read(|transaction| VERSIONED_COMMIT_LOG.iter(transaction))?
+            .into_iter()
+            .map(|(_sequence, entry)| entry)
+            .collect())
+    }
+
     pub fn replay_from_sequence(
         &self,
         start: crate::CommitSequence,
     ) -> Result<Vec<CommitLogEntry>> {
         Ok(self
             .commit_log()?
+            .into_iter()
+            .filter(|entry| entry.commit_sequence() >= start)
+            .collect())
+    }
+
+    pub fn versioned_replay_from_sequence(
+        &self,
+        start: crate::CommitSequence,
+    ) -> Result<Vec<VersionedCommitLogEntry>> {
+        Ok(self
+            .versioned_commit_log()?
             .into_iter()
             .filter(|entry| entry.commit_sequence() >= start)
             .collect())
@@ -1101,6 +1215,120 @@ impl Engine {
         })?;
         Ok(())
     }
+
+    fn versioned_record_entry<RecordValue>(
+        &self,
+        commit_sequence: crate::CommitSequence,
+        snapshot: SnapshotIdentifier,
+        operation: SemaOperation,
+        table_name: TableName,
+        key: Option<crate::RecordKey>,
+        record: &RecordValue,
+    ) -> Result<Option<VersionedCommitLogEntry>>
+    where
+        RecordValue: EngineStoredValue,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        if self.versioning_policy.is_none() {
+            return Ok(None);
+        }
+        self.versioned_entry(
+            commit_sequence,
+            snapshot,
+            NonEmpty::single(VersionedLogOperation::new(
+                operation,
+                table_name,
+                key,
+                self.versioned_record_payload(table_name, record)?,
+            )),
+        )
+    }
+
+    fn versioned_tombstone_entry(
+        &self,
+        commit_sequence: crate::CommitSequence,
+        snapshot: SnapshotIdentifier,
+        operation: SemaOperation,
+        table_name: TableName,
+        key: Option<crate::RecordKey>,
+    ) -> Result<Option<VersionedCommitLogEntry>> {
+        if self.versioning_policy.is_none() {
+            return Ok(None);
+        }
+        self.versioned_entry(
+            commit_sequence,
+            snapshot,
+            NonEmpty::single(VersionedLogOperation::new(
+                operation,
+                table_name,
+                key,
+                VersionedPayload::tombstone(),
+            )),
+        )
+    }
+
+    fn versioned_entry(
+        &self,
+        commit_sequence: crate::CommitSequence,
+        snapshot: SnapshotIdentifier,
+        operations: NonEmpty<VersionedLogOperation>,
+    ) -> Result<Option<VersionedCommitLogEntry>> {
+        let Some(policy) = self.versioning_policy.as_ref() else {
+            return Ok(None);
+        };
+        Ok(Some(VersionedCommitLogEntry::new(
+            policy.store_name().clone(),
+            policy.schema_hash(),
+            commit_sequence,
+            snapshot,
+            self.latest_versioned_entry_digest()?,
+            operations,
+        )))
+    }
+
+    fn versioned_record_payload<RecordValue>(
+        &self,
+        table_name: TableName,
+        record: &RecordValue,
+    ) -> Result<VersionedPayload>
+    where
+        RecordValue: EngineStoredValue,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let bytes = rkyv::to_bytes::<rancor::Error>(record).map_err(|source| {
+            Error::VersionedPayloadEncode {
+                table: table_name.as_str().to_owned(),
+                message: source.to_string(),
+            }
+        })?;
+        Ok(VersionedPayload::record(bytes.as_slice().to_vec()))
+    }
+
+    fn latest_versioned_entry_digest(&self) -> Result<Option<crate::EntryDigest>> {
+        Ok(self
+            .storage
+            .read(|transaction| VERSIONED_COMMIT_LOG.iter(transaction))?
+            .into_iter()
+            .map(|(_sequence, entry)| entry.entry_digest())
+            .last())
+    }
+
+    fn insert_versioned_entry(
+        &self,
+        transaction: &sema::WriteTransaction,
+        entry: &Option<VersionedCommitLogEntry>,
+    ) -> sema::Result<()> {
+        if let Some(entry) = entry {
+            VERSIONED_COMMIT_LOG.insert(transaction, entry.commit_sequence().value(), entry)?;
+        }
+        Ok(())
+    }
 }
 
 struct CommittedEffect<RecordValue> {
@@ -1131,6 +1359,7 @@ impl<RecordValue> CommittedEffect<RecordValue> {
 pub struct EngineOpen {
     path: PathBuf,
     schema: Schema,
+    versioning_policy: Option<VersioningPolicy>,
 }
 
 impl EngineOpen {
@@ -1138,7 +1367,13 @@ impl EngineOpen {
         Self {
             path: path.into(),
             schema: Schema { version },
+            versioning_policy: None,
         }
+    }
+
+    pub fn with_versioning(mut self, policy: VersioningPolicy) -> Self {
+        self.versioning_policy = Some(policy);
+        self
     }
 
     pub fn path(&self) -> &Path {
@@ -1147,5 +1382,9 @@ impl EngineOpen {
 
     pub fn schema(&self) -> &Schema {
         &self.schema
+    }
+
+    pub fn versioning_policy(&self) -> Option<&VersioningPolicy> {
+        self.versioning_policy.as_ref()
     }
 }

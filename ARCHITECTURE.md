@@ -88,6 +88,23 @@ redb calls.
 - A multi-operation commit writes one `CommitLogEntry` containing
   `NonEmpty<CommitLogOperation>` in the same committed write transaction
   as the domain records.
+- `EngineOpen::with_versioning(VersioningPolicy)` enables the reusable
+  versioned-state log for a component database. The default `EngineOpen`
+  path does not emit payload-bearing version entries.
+- The versioned log is stored in the same `.sema` file as table state.
+  A successful write inserts the table mutation, the metadata
+  `CommitLogEntry`, and the payload-bearing `VersionedCommitLogEntry` in
+  one storage-kernel write transaction.
+- `VersionedCommitLogEntry` carries the component store name, schema
+  hash, `CommitSequence`, `SnapshotIdentifier`, previous entry digest,
+  entry digest, and `NonEmpty<VersionedLogOperation>`.
+- Versioned assert/mutate operations store the rkyv bytes of the typed
+  record that landed in the registered table. Versioned retract
+  operations store a tombstone with the same table/key identity.
+- `versioned_commit_log` and `versioned_replay_from_sequence` expose the
+  local log for component backup/mirror code. Network transport, remote
+  acknowledgement policy, and server-side retention are not part of
+  `sema-engine`.
 - Every committed write transaction advances a durable `CommitSequence`.
   The sequence is a per-database high-water mark for version handover:
   a next-version daemon can copy state at sequence N, then replay commits
@@ -192,13 +209,27 @@ engine.storage_kernel().write(|transaction| {
 })?;
 ```
 
+Components that opt into reusable state versioning configure it at open:
+
+```rust
+let open = EngineOpen::new(database_path, SchemaVersion::new(1)).with_versioning(
+    VersioningPolicy::new(
+        VersionedStoreName::new("mind"),
+        SchemaHash::for_label("mind-schema-v7"),
+    ),
+);
+let engine = Engine::open(open)?;
+let _version_tail = engine.versioned_replay_from_sequence(CommitSequence::new(1))?;
+```
+
 This proves the layering: registered record family, single-operation `Assert` /
 `Mutate` / `Retract`, structural multi-operation `commit`, `Match`, `Validate`,
 executable `ReadPlan` nodes for all/key/range reads, typed query-algebra
 nodes for future constrain/project/aggregate/infer/recurse execution,
-typed rkyv values, commit-log cursor, bounded log replay, table
-introspection, best-effort post-commit subscription delivery for write
-operations, and durable storage through `sema`.
+typed rkyv values, commit-log cursor, bounded log replay, optional
+payload-bearing version replay, table introspection, best-effort
+post-commit subscription delivery for write operations, and durable
+storage through `sema`.
 
 For schema contracts that need engine-assigned numeric record identity, a
 component registers an identified family instead of deriving identity from

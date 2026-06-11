@@ -23,6 +23,9 @@ pub enum Error {
     #[error("assert key already exists: {table}/{key}")]
     DuplicateAssertKey { table: String, key: String },
 
+    #[error("versioned payload encode failed for table {table}: {message}")]
+    VersionedPayloadEncode { table: String, message: String },
+
     #[error("subscription registry lock poisoned")]
     SubscriptionRegistryPoisoned,
 

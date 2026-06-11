@@ -16,6 +16,7 @@ pub mod sequence;
 pub mod snapshot;
 pub mod subscribe;
 pub mod table;
+pub mod versioning;
 
 pub use catalog::{Catalog, TableRegistration};
 pub use engine::{Engine, EngineOpen};
@@ -50,4 +51,8 @@ pub use subscribe::{
 pub use table::{
     IdentifiedRecord, IdentifiedTableDescriptor, IdentifiedTableReference, TableDescriptor,
     TableName, TableReference,
+};
+pub use versioning::{
+    EntryDigest, SchemaHash, VersionedCommitLogEntry, VersionedLogOperation, VersionedPayload,
+    VersionedStoreName, VersioningPolicy,
 };
