@@ -17,6 +17,11 @@ pub mod snapshot;
 pub mod subscribe;
 pub mod table;
 
+/// Concept spike (designer branch): a reusable version-controlled
+/// Sema-state library. See `src/versioned/mod.rs` and
+/// `~/primary/reports/system-designer/92-reusable-versioned-sema-library/`.
+pub mod versioned;
+
 pub use catalog::{Catalog, TableRegistration};
 pub use engine::{Engine, EngineOpen};
 pub use error::{Error, Result};
