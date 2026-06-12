@@ -3,7 +3,9 @@
 //! digest chain at their successor; rewritten payloads fail per-entry
 //! digest recomputation; doctored checkpoint metadata, forged
 //! segments, and fixed-up outer digests are rejected at load, at
-//! ingest, and at verify; a stamped store schema hash must re-derive
+//! ingest, and at verify; a dead latest-checkpoint cursor and a
+//! dangling segment reference are typed at load before verification
+//! runs; a stamped store schema hash must re-derive
 //! from its carried inventory; and an outbox row that disagrees with
 //! the logged entry refuses acknowledgement. Doctoring goes through
 //! the raw storage kernel (no engine path can write engine tables) or
@@ -33,6 +35,8 @@ const CHECKPOINTS: sema::Table<u64, CheckpointMetadata> =
     sema::Table::new("__sema_engine_checkpoints");
 const CHECKPOINT_SEGMENTS: sema::Table<&'static [u8; 32], CheckpointSegment> =
     sema::Table::new("__sema_engine_checkpoint_segments");
+const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
+const LATEST_CHECKPOINT_KEY: &str = "latest_checkpoint";
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 #[rkyv(derive(Debug))]
@@ -403,6 +407,29 @@ fn doctored_checkpoint_metadata_is_rejected_at_load_and_at_ingest() {
 }
 
 #[test]
+fn dead_latest_checkpoint_cursor_is_a_typed_missing_row() {
+    let fixture = Fixture::new();
+    let genuine = fixture.checkpointed("dead-cursor");
+    let dead = genuine.metadata().sequence().value() + 7;
+
+    // Point the latest-checkpoint cursor at a sequence no checkpoint
+    // row was ever written under.
+    fixture
+        .raw_kernel("dead-cursor")
+        .write(|transaction| COUNTERS.insert(transaction, LATEST_CHECKPOINT_KEY, &dead))
+        .expect("dead cursor writes");
+
+    let engine = fixture.open_versioned("dead-cursor");
+    let error = engine
+        .latest_checkpoint()
+        .expect_err("the cursor names a row that does not exist");
+    assert!(matches!(
+        error,
+        sema_engine::Error::CheckpointRowMissing { sequence } if sequence == dead
+    ));
+}
+
+#[test]
 fn forged_segment_under_a_genuine_address_is_rejected_at_load() {
     let fixture = Fixture::new();
     let genuine = fixture.checkpointed("forged-segment");
@@ -438,6 +465,41 @@ fn forged_segment_under_a_genuine_address_is_rejected_at_load() {
     };
     assert_eq!(referenced, reference.digest());
     assert_eq!(computed, forged.digest());
+}
+
+#[test]
+fn flipped_segment_reference_dangles_at_load_before_verification_runs() {
+    let fixture = Fixture::new();
+    let genuine = fixture.checkpointed("dangling-reference");
+    let metadata = genuine.metadata();
+    let reference = metadata.segments()[0];
+    let mut flipped = *reference.digest().bytes();
+    flipped[0] ^= 0x01;
+    let flipped = SegmentDigest::new(flipped);
+
+    // Flip one bit of the stored segment-reference digest: the
+    // metadata row now names a content address no segment lives under.
+    let doctored = Splice::flipping(reference.digest().bytes()).metadata(metadata);
+    fixture
+        .raw_kernel("dangling-reference")
+        .write(|transaction| {
+            CHECKPOINTS.insert(transaction, metadata.sequence().value(), &doctored)
+        })
+        .expect("doctored metadata writes");
+
+    // The segment fetch runs before checkpoint verification, so the
+    // dangling reference fires first — carrying the flipped digest,
+    // a real in-bounds address, never a fabricated zero.
+    let engine = fixture.open_versioned("dangling-reference");
+    let error = engine
+        .latest_checkpoint()
+        .expect_err("the flipped reference dangles");
+    let sema_engine::Error::SegmentMissing { digest } = error else {
+        panic!("expected SegmentMissing, got {error:?}");
+    };
+    assert_eq!(digest, flipped);
+    assert_ne!(digest, reference.digest());
+    assert_ne!(digest, SegmentDigest::new([0; 32]));
 }
 
 #[test]
