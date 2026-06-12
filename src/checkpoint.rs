@@ -501,15 +501,23 @@ impl Checkpoint {
                 computed,
             });
         }
-        if self.segments.len() != self.metadata.segments.len() {
-            return Err(Error::SegmentMissing {
-                digest: self
-                    .metadata
-                    .segments
-                    .get(self.segments.len())
-                    .map(SegmentReference::digest)
-                    .unwrap_or(SegmentDigest::new([0; 32])),
-            });
+        match self.segments.len().cmp(&self.metadata.segments.len()) {
+            std::cmp::Ordering::Less => {
+                // The first reference past the supplied count names
+                // what is missing; the index is in bounds by
+                // construction, so the digest is always a real
+                // reference, never fabricated.
+                return Err(Error::SegmentMissing {
+                    digest: self.metadata.segments[self.segments.len()].digest(),
+                });
+            }
+            std::cmp::Ordering::Greater => {
+                return Err(Error::SegmentSurplus {
+                    referenced: self.metadata.segments.len(),
+                    supplied: self.segments.len(),
+                });
+            }
+            std::cmp::Ordering::Equal => {}
         }
         for (segment, reference) in self.segments.iter().zip(&self.metadata.segments) {
             let computed = segment.digest();

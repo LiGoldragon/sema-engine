@@ -2,7 +2,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use signal_frame::NonEmpty;
 use signal_sema::SemaOperation;
 
-use crate::{CommitSequence, RecordKey, SnapshotIdentifier};
+use crate::{CommitSequence, RecordKey, SnapshotIdentifier, TableName};
 
 /// Durable record of one commit: a request that committed all its
 /// write effects (or none) under a single [`SnapshotIdentifier`]. A single-operation
@@ -89,7 +89,7 @@ pub struct CommitLogOperation {
 }
 
 impl CommitLogOperation {
-    pub fn new(operation: SemaOperation, table: impl Into<String>, key: Option<RecordKey>) -> Self {
+    pub fn new(operation: SemaOperation, table: TableName, key: Option<RecordKey>) -> Self {
         Self {
             operation,
             table_name: table.into(),
@@ -112,13 +112,15 @@ impl CommitLogOperation {
 
 /// A versioned log operation projects down to its metadata commit
 /// log operation: same operation, table coordinate, and key; the
-/// payload drops.
+/// payload drops. The logged coordinate is already a bare string, so
+/// the projection constructs the row directly instead of widening the
+/// typed public constructor to accept strings.
 impl From<&crate::VersionedLogOperation> for CommitLogOperation {
     fn from(operation: &crate::VersionedLogOperation) -> Self {
-        Self::new(
-            operation.operation(),
-            operation.family().table_name(),
-            operation.key().cloned(),
-        )
+        Self {
+            operation: operation.operation(),
+            table_name: operation.family().table_name().to_owned(),
+            key: operation.key().cloned(),
+        }
     }
 }

@@ -97,6 +97,11 @@ pub enum Error {
     #[error("checkpoint segment is missing from the store: {digest}")]
     SegmentMissing { digest: SegmentDigest },
 
+    #[error(
+        "checkpoint supplies {supplied} segments but its metadata references only {referenced}"
+    )]
+    SegmentSurplus { referenced: usize, supplied: usize },
+
     #[error("latest-checkpoint cursor names checkpoint {sequence}, which has no stored row")]
     CheckpointRowMissing { sequence: u64 },
 
