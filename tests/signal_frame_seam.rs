@@ -9,8 +9,9 @@ use std::path::PathBuf;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, CommitRequest, Engine, EngineOpen, EngineRecord, Mutation, QueryPlan, RecordKey,
-    Retraction, SchemaVersion, SnapshotIdentifier, TableDescriptor, TableName,
+    Assertion, CommitRequest, Engine, EngineOpen, EngineRecord, FamilyName, Mutation, QueryPlan,
+    RecordKey, Retraction, SchemaHash, SchemaVersion, SnapshotIdentifier, TableDescriptor,
+    TableName,
 };
 use signal_frame::{NonEmpty, Request, RequestPayload};
 use signal_sema::SemaOperation;
@@ -72,7 +73,11 @@ impl SeamFixture {
     }
 
     fn descriptor(&self) -> TableDescriptor<Thought> {
-        TableDescriptor::new(TableName::new("thoughts"))
+        TableDescriptor::new(
+            TableName::new("thoughts"),
+            FamilyName::new("thought"),
+            SchemaHash::for_label("thought-v1"),
+        )
     }
 }
 

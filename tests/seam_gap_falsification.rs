@@ -20,9 +20,9 @@ use std::sync::{Arc, atomic::AtomicUsize, atomic::Ordering};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, SchemaVersion, SinkError,
-    SnapshotIdentifier, SubscriptionEvent, SubscriptionIdentifier, SubscriptionSink,
-    TableDescriptor, TableName,
+    Assertion, Engine, EngineOpen, EngineRecord, FamilyName, QueryPlan, RecordKey, SchemaHash,
+    SchemaVersion, SinkError, SnapshotIdentifier, SubscriptionEvent, SubscriptionIdentifier,
+    SubscriptionSink, TableDescriptor, TableName,
 };
 use tempfile::TempDir;
 
@@ -91,7 +91,11 @@ impl Fixture {
     }
 
     fn thought_descriptor(&self) -> TableDescriptor<Thought> {
-        TableDescriptor::new(TableName::new("thoughts"))
+        TableDescriptor::new(
+            TableName::new("thoughts"),
+            FamilyName::new("thought"),
+            SchemaHash::for_label("thought-v1"),
+        )
     }
 }
 
@@ -335,8 +339,9 @@ fn subscription_lifetime_can_be_managed_externally_via_handle_id_filter() {
 // ─── Gap 2 inspection: commit_multi ──────────────────────
 //
 // Claim under test (from audit §4.2): "cross-table atomic commits
-// require `storage_kernel().write()`, bypassing the engine's
-// operation-tracking surface."
+// required raw storage-kernel writes, bypassing the engine's
+// operation-tracking surface." (That write surface has since been
+// removed; the engine hands out a read-only `StorageReader`.)
 //
 // This is a witness: what happens when a component tries to
 // express cross-table atomicity today through only the typed
@@ -350,9 +355,11 @@ fn cross_table_writes_via_two_engine_commits_are_not_engine_atomic() {
         .register_table(fixture.thought_descriptor())
         .expect("thoughts table registers");
     let activities = engine
-        .register_table(TableDescriptor::<ActivityEntry>::new(TableName::new(
-            "activities",
-        )))
+        .register_table(TableDescriptor::<ActivityEntry>::new(
+            TableName::new("activities"),
+            FamilyName::new("activity-entry"),
+            SchemaHash::for_label("activity-entry-v1"),
+        ))
         .expect("activities table registers");
 
     engine
@@ -387,22 +394,13 @@ fn cross_table_writes_via_two_engine_commits_are_not_engine_atomic() {
     assert_eq!(log[1].operations().head().table_name(), "activities");
 
     // Verdict: cross-table atomicity through the typed engine
-    // surface is genuinely not expressible. The escape hatch is
-    // `engine.storage_kernel().write(|txn| { ... })`, which
-    // bypasses:
-    //
-    // - commit-log entry emission (no `CommitLogEntry` recorded),
-    // - snapshot-ID bump (the engine's `LATEST_SNAPSHOT_KEY`
-    //   counter is not advanced),
-    // - subscription delta delivery (no
-    //   `SubscriptionRegistry::deliver_delta` call).
-    //
-    // A multi-table write through `storage_kernel` is therefore
-    // architecturally invisible to the engine's operation-tracking
-    // machinery. Inspectors of the commit log, subscribers
-    // observing typed deltas, and snapshot-anchored callers all
-    // miss the write. Per the inelegance criterion, the gap
-    // holds.
+    // surface is genuinely not expressible, and the old escape
+    // hatch — a raw storage-kernel write that bypassed commit-log
+    // emission, the snapshot bump, and subscription delivery — no
+    // longer exists: `Engine::storage_reader()` has no write
+    // affordance. A consumer that needs cross-table atomicity must
+    // wait for the typed surface to grow it. Per the inelegance
+    // criterion, the gap holds.
     //
     // The pressure is light today: no consumer pushes for
     // cross-table atomic writes. The workspace pattern
@@ -427,8 +425,8 @@ fn cross_table_writes_via_two_engine_commits_are_not_engine_atomic() {
     //    request, preserving commit-log + snapshot + delta
     //    delivery semantics.
     // 3. **Document the constraint.** Consumers that hit it
-    //    surface a contract-design issue rather than reaching
-    //    for `storage_kernel`.
+    //    surface a contract-design issue; there is no raw-write
+    //    path to reach for.
 }
 
 // ─── New observations from the falsification pass ────────

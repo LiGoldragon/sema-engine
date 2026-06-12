@@ -4,6 +4,11 @@
 //! over registered typed record families. Components own daemons,
 //! actors, sockets, authorization, and domain validation; this crate is
 //! only the reusable engine library.
+//!
+//! The versioned commit log is the authoritative source of truth for
+//! component Sema state; the table store is a rebuildable materialized
+//! view folded from it. Every durable write goes through the engine's
+//! logged choke points — the storage kernel hands out read access only.
 
 pub mod catalog;
 pub mod engine;
@@ -19,7 +24,7 @@ pub mod table;
 pub mod versioning;
 
 pub use catalog::{Catalog, TableRegistration};
-pub use engine::{Engine, EngineOpen};
+pub use engine::{Engine, EngineOpen, StorageReader};
 pub use error::{Error, Result};
 pub use log::{CommitLogEntry, CommitLogOperation};
 pub use mutation::{
@@ -37,9 +42,8 @@ pub use record::{
     EngineRecord, EngineStoredRecord, EngineStoredValue, RecordIdentifier, RecordKey,
 };
 pub use sema::{
-    Error as StorageKernelError, Result as StorageKernelResult, SchemaVersion,
-    Sema as StorageKernel, Table as StorageKernelTable,
-    WriteTransaction as StorageWriteTransaction,
+    Error as StorageKernelError, ReadTransaction as StorageReadTransaction,
+    Result as StorageKernelResult, SchemaVersion, Table as StorageKernelTable,
 };
 pub use sequence::CommitSequence;
 pub use snapshot::{DatabaseMarker, SnapshotIdentifier};
@@ -53,6 +57,7 @@ pub use table::{
     TableName, TableReference,
 };
 pub use versioning::{
-    EntryDigest, SchemaHash, VersionedCommitLogEntry, VersionedLogOperation, VersionedPayload,
+    EntryDigest, FamilyIdentity, FamilyName, ReplayReceipt, SchemaHash, StoreSchemaHash,
+    VersionedCommitLogEntry, VersionedLogOperation, VersionedPayload, VersionedReplay,
     VersionedStoreName, VersioningPolicy,
 };

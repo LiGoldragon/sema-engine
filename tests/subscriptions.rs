@@ -6,9 +6,9 @@ use std::time::Duration;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, CommitRequest, CommitSequence, DeltaKind, Engine, EngineOpen, EngineRecord,
-    Mutation, QueryPlan, RecordKey, Retraction, SchemaVersion, SequenceRange, SinkError,
-    SnapshotIdentifier, SubscriptionDeliveryMode, SubscriptionEvent, SubscriptionSink,
-    TableDescriptor, TableName,
+    FamilyName, Mutation, QueryPlan, RecordKey, Retraction, SchemaHash, SchemaVersion,
+    SequenceRange, SinkError, SnapshotIdentifier, SubscriptionDeliveryMode, SubscriptionEvent,
+    SubscriptionSink, TableDescriptor, TableName,
 };
 use tempfile::TempDir;
 
@@ -55,7 +55,11 @@ impl SubscriptionFixture {
     }
 
     fn descriptor(&self) -> TableDescriptor<SubscribedRecord> {
-        TableDescriptor::new(TableName::new("subscribed_records"))
+        TableDescriptor::new(
+            TableName::new("subscribed_records"),
+            FamilyName::new("subscribed-record"),
+            SchemaHash::for_label("subscribed-record-v1"),
+        )
     }
 }
 

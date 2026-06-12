@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize, rancor};
 use sema_engine::{
-    Assertion, CommitRequest, CommitSequence, Engine, EngineOpen, EngineRecord, QueryPlan,
-    RecordKey, Retraction, SchemaHash, SchemaVersion, SnapshotIdentifier, TableDescriptor,
-    TableName, VersionedPayload, VersionedStoreName, VersioningPolicy,
+    Assertion, CommitRequest, CommitSequence, Engine, EngineOpen, EngineRecord, FamilyName,
+    QueryPlan, RecordKey, Retraction, SchemaHash, SchemaVersion, SnapshotIdentifier,
+    TableDescriptor, TableName, VersionedPayload, VersionedStoreName, VersioningPolicy,
 };
 use signal_sema::SemaOperation;
 use tempfile::TempDir;
@@ -54,17 +54,18 @@ impl LogFixture {
     fn open_versioned_engine(&self) -> Engine {
         Engine::open(
             EngineOpen::new(self.database_path(), SchemaVersion::new(1)).with_versioning(
-                VersioningPolicy::new(
-                    VersionedStoreName::new("operation-log-fixture"),
-                    SchemaHash::for_label("operation-log-v1"),
-                ),
+                VersioningPolicy::new(VersionedStoreName::new("operation-log-fixture")),
             ),
         )
         .expect("versioned engine opens")
     }
 
     fn descriptor(&self) -> TableDescriptor<LoggedRecord> {
-        TableDescriptor::new(TableName::new("logged_records"))
+        TableDescriptor::new(
+            TableName::new("logged_records"),
+            FamilyName::new("logged-record"),
+            SchemaHash::for_label("logged-record-v1"),
+        )
     }
 
     fn decode_payload(&self, payload: &VersionedPayload) -> LoggedRecord {
@@ -197,10 +198,7 @@ fn versioned_commit_log_carries_payloads_and_digest_chain() {
     assert_eq!(tail.len(), 1);
     assert_eq!(tail[0].commit_sequence(), CommitSequence::new(2));
     assert_eq!(log[0].store_name().as_str(), "operation-log-fixture");
-    assert_eq!(
-        log[0].schema_hash(),
-        SchemaHash::for_label("operation-log-v1")
-    );
+    assert_eq!(log[0].schema_hash(), engine.store_schema_hash());
     assert_eq!(log[0].commit_sequence(), CommitSequence::new(1));
     assert_eq!(log[0].snapshot(), SnapshotIdentifier::new(1));
     assert_eq!(log[0].previous_entry_digest(), None);

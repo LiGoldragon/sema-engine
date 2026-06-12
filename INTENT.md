@@ -4,7 +4,27 @@
 state-bearing components. Component daemons do not open redb, define redb
 tables, run redb transactions, or maintain their own database commit
 ledger. They own domain validation, actors, sockets, authorization, and
-schema-root dispatch; durable database work goes through `Engine`.
+schema-root dispatch; durable database work goes through `Engine`. Per
+Spirit fosp (Correction): [Sema-engine is the exclusive interface to the
+database. No component daemon may make direct redb calls.]
+
+Per Spirit iir4 (Decision): [The versioned operation log is the
+authoritative source of truth for component Sema state, and the redb
+store becomes a rebuildable materialized view folded from the log.]
+Every durable write goes through the engine's logged choke points; the
+storage kernel hands components a read-only `StorageReader` with no
+write affordance, so the commit log stays complete by construction.
+Versioned log operations carry typed family identity — the family name
+(the schema declaration name that survives table renames) plus a
+per-family blake3 schema hash — and replay dispatches on that identity;
+the table name is only the current storage coordinate. The store-level
+schema hash is derived, domain-separated blake3 over the sorted
+(family, schema hash) inventory in the engine catalog, never
+hand-supplied. Per Spirit x0ja (Constraint): blake3 for all content
+addressing. Per Spirit 29pb/j487: native version control is one
+reusable library and state loss is unacceptable — components configure
+a `VersioningPolicy` once instead of reimplementing component-local
+durability journals.
 
 `sema` is the storage kernel that hides redb behind typed rkyv tables and
 schema-version-guarded `.sema` files. `sema-engine` is the reusable
@@ -17,10 +37,10 @@ When a component opts in with a `VersioningPolicy`, `sema-engine` also
 records a payload-bearing, hash-linked versioned commit log inside the
 same `.sema` file and the same write transaction as the data write. That
 log is the shared substrate for reusable SEMA-state versioning and
-backup: components configure store identity and schema hash once instead
-of reimplementing their own component-local durability journals. Remote
-transport, acknowledgement policy, and server storage remain outside this
-library-only crate.
+backup: components configure the store name once; family identity is
+declared per registered family and the store-level schema hash derives
+from the registered inventory. Remote transport, acknowledgement policy,
+and server storage remain outside this library-only crate.
 
 The engine surface should follow the architecture of its users instead of
 forcing components to build compatibility shims. Domain-keyed record
@@ -42,10 +62,11 @@ they return, giving component actors one compact handover/replay boundary
 without leaking redb transactions or turning this crate into a runtime.
 
 Consumers that still have component-local tables during migration receive
-storage-kernel transaction types from `sema-engine` instead of depending on
-redb directly. The handoff is transitional: it keeps the daemon's dependency
-surface on the SEMA boundary while those local tables are lifted into engine
-record families.
+read-only storage-kernel access (`StorageReader`, `StorageReadTransaction`)
+from `sema-engine` instead of depending on redb directly. The handoff is
+transitional and read-only: durable writes have no path around the logged
+choke points, so lifting local tables into engine record families is the
+only way to write them.
 
 Component database files use the `.sema` extension. redb remains an
 implementation detail of the storage kernel, not the component-facing file

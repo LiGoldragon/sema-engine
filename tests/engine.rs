@@ -3,10 +3,11 @@ use std::path::PathBuf;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     AggregatePlan, Assertion, CommitRequest, CommitSequence, DatabaseMarker, Engine, EngineOpen,
-    EngineRecord, FieldSelection, IdentifiedAssertion, IdentifiedMutation, IdentifiedQueryPlan,
-    IdentifiedRetraction, IdentifiedTableDescriptor, KeyRange, KeyedAssertion, KeyedMutation,
-    Mutation, QueryPlan, ReadOperator, RecordIdentifier, RecordKey, RecursionMode, Retraction,
-    RuleSetRef, SchemaVersion, SnapshotIdentifier, TableDescriptor, TableName, UnificationPlan,
+    EngineRecord, FamilyName, FieldSelection, IdentifiedAssertion, IdentifiedMutation,
+    IdentifiedQueryPlan, IdentifiedRetraction, IdentifiedTableDescriptor, KeyRange, KeyedAssertion,
+    KeyedMutation, Mutation, QueryPlan, ReadOperator, RecordIdentifier, RecordKey, RecursionMode,
+    Retraction, RuleSetRef, SchemaHash, SchemaVersion, SnapshotIdentifier, TableDescriptor,
+    TableName, UnificationPlan,
 };
 use signal_sema::SemaOperation;
 use tempfile::TempDir;
@@ -70,15 +71,27 @@ impl EngineFixture {
     }
 
     fn toy_descriptor(&self) -> TableDescriptor<ToyRecord> {
-        TableDescriptor::new(TableName::new("toy_records"))
+        TableDescriptor::new(
+            TableName::new("toy_records"),
+            FamilyName::new("toy-record"),
+            SchemaHash::for_label("toy-record-v1"),
+        )
     }
 
     fn identified_descriptor(&self) -> IdentifiedTableDescriptor<ToyRecord> {
-        IdentifiedTableDescriptor::new(TableName::new("identified_toy_records"))
+        IdentifiedTableDescriptor::new(
+            TableName::new("identified_toy_records"),
+            FamilyName::new("identified-toy-record"),
+            SchemaHash::for_label("identified-toy-record-v1"),
+        )
     }
 
     fn imported_descriptor(&self) -> TableDescriptor<ImportedContractRecord> {
-        TableDescriptor::new(TableName::new("imported_contract_records"))
+        TableDescriptor::new(
+            TableName::new("imported_contract_records"),
+            FamilyName::new("imported-contract-record"),
+            SchemaHash::for_label("imported-contract-record-v1"),
+        )
     }
 }
 

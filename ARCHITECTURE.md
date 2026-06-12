@@ -27,12 +27,23 @@ redb calls.
   must own each `Engine` from one actor and serialise all engine calls
   through that actor.
 - Consumers that still have unmigrated component-local tables use
-  `Engine::storage_kernel()` rather than opening a second `sema::Sema`
-  handle to the same `.sema` file.
-- Unmigrated component-local table reducers use the public
-  `StorageWriteTransaction` alias. Component crates do not depend on
-  `redb` directly just to name the transaction type.
+  `Engine::storage_reader()` rather than opening a second `sema::Sema`
+  handle to the same `.sema` file. The handoff is read-only:
+  `StorageReader` has no write affordance, so no durable write can
+  bypass the commit log. Component crates do not depend on `redb`
+  directly just to name the read-transaction type
+  (`StorageReadTransaction`).
+- `Engine` guards an internal storage layout version. Stores written
+  before typed family identity hard-fail at open with a typed
+  `StorageLayoutMismatch` error instead of decoding garbage.
 - `Engine` registers record families before executing database operations.
+- Registration declares typed family identity: every `TableDescriptor` /
+  `IdentifiedTableDescriptor` carries a `FamilyName` (the schema
+  declaration name that survives table renames) and a per-family blake3
+  `SchemaHash`. The engine persists the family inventory in its catalog
+  and rejects re-registration under a conflicting identity
+  (`FamilyIdentityMismatch`) or a second table binding for the same
+  family version (`FamilyAlreadyBound`).
 - Domain-keyed record families use `TableDescriptor` /
   `TableReference` and either record-provided `RecordKey` values
   (`EngineRecord`) or explicit keys (`KeyedAssertion` /
@@ -89,15 +100,23 @@ redb calls.
   `NonEmpty<CommitLogOperation>` in the same committed write transaction
   as the domain records.
 - `EngineOpen::with_versioning(VersioningPolicy)` enables the reusable
-  versioned-state log for a component database. The default `EngineOpen`
-  path does not emit payload-bearing version entries.
+  versioned-state log for a component database. The policy names only
+  the store; schema identity is never hand-supplied. The default
+  `EngineOpen` path does not emit payload-bearing version entries.
 - The versioned log is stored in the same `.sema` file as table state.
   A successful write inserts the table mutation, the metadata
   `CommitLogEntry`, and the payload-bearing `VersionedCommitLogEntry` in
   one storage-kernel write transaction.
-- `VersionedCommitLogEntry` carries the component store name, schema
-  hash, `CommitSequence`, `SnapshotIdentifier`, previous entry digest,
-  entry digest, and `NonEmpty<VersionedLogOperation>`.
+- `VersionedCommitLogEntry` carries the component store name, the
+  derived `StoreSchemaHash` (domain-separated blake3 over the sorted
+  (family, schema hash) inventory; table names excluded so a rename
+  keeps store identity stable), `CommitSequence`, `SnapshotIdentifier`,
+  previous entry digest, entry digest, and
+  `NonEmpty<VersionedLogOperation>`.
+- `VersionedLogOperation` carries a typed `FamilyIdentity` — family
+  name, per-family schema hash, and the table coordinate the operation
+  landed in. Replay dispatches on (family, schema hash); the table name
+  is only the current coordinate.
 - Versioned assert/mutate operations store the rkyv bytes of the typed
   record that landed in the registered table. Versioned retract
   operations store a tombstone with the same table/key identity.
@@ -105,6 +124,13 @@ redb calls.
   local log for component backup/mirror code. Network transport, remote
   acknowledgement policy, and server-side retention are not part of
   `sema-engine`.
+- `Engine::replay_versioned(VersionedReplay)` folds versioned log
+  entries into a registered family, dispatching each operation on
+  family identity. A table renamed between log and replay (same family,
+  same schema hash, new table name) replays into the family's current
+  table. Application goes through the public write choke points, so a
+  rebuilt store logs its own complete history — the log is
+  authoritative; the table store is a rebuildable materialized view.
 - Every committed write transaction advances a durable `CommitSequence`.
   The sequence is a per-database high-water mark for version handover:
   a next-version daemon can copy state at sequence N, then replay commits
@@ -173,7 +199,11 @@ plans:
 
 ```rust
 let mut engine = Engine::open(EngineOpen::new(database_path, SchemaVersion::new(1)))?;
-let family = engine.register_table(TableDescriptor::new(TableName::new("thoughts")))?;
+let family = engine.register_table(TableDescriptor::new(
+    TableName::new("thoughts"),
+    FamilyName::new("thought"),
+    SchemaHash::for_label("thought-v1"),
+))?;
 
 // Single-operation writes
 engine.assert(Assertion::new(family.clone(), new_thought))?;
@@ -203,8 +233,10 @@ let validation = engine.validate(QueryPlan::all(family.clone()))?;
 let _tables = engine.list_tables();
 let _log = engine.commit_log_range(SequenceRange::from(snapshot.snapshot()))?;
 let _subscription = engine.subscribe(QueryPlan::all(family.clone()), sink)?;
-engine.storage_kernel().write(|transaction| {
-    // temporary component-local tables that have not moved to engine operations yet
+engine.storage_reader().read(|transaction| {
+    // read-only access to temporary component-local tables that have
+    // not moved to engine record families yet; there is no write
+    // counterpart
     Ok(())
 })?;
 ```
@@ -212,12 +244,8 @@ engine.storage_kernel().write(|transaction| {
 Components that opt into reusable state versioning configure it at open:
 
 ```rust
-let open = EngineOpen::new(database_path, SchemaVersion::new(1)).with_versioning(
-    VersioningPolicy::new(
-        VersionedStoreName::new("mind"),
-        SchemaHash::for_label("mind-schema-v7"),
-    ),
-);
+let open = EngineOpen::new(database_path, SchemaVersion::new(1))
+    .with_versioning(VersioningPolicy::new(VersionedStoreName::new("mind")));
 let engine = Engine::open(open)?;
 let _version_tail = engine.versioned_replay_from_sequence(CommitSequence::new(1))?;
 ```
@@ -237,9 +265,11 @@ the record payload:
 
 ```rust
 let mut engine = Engine::open(EngineOpen::new(database_path, SchemaVersion::new(1)))?;
-let entries = engine.register_identified_table(
-    IdentifiedTableDescriptor::new(TableName::new("entries")),
-)?;
+let entries = engine.register_identified_table(IdentifiedTableDescriptor::new(
+    TableName::new("entries"),
+    FamilyName::new("entry"),
+    SchemaHash::for_label("entry-v1"),
+))?;
 
 let receipt = engine.assert_identified(IdentifiedAssertion::new(entries, entry))?;
 let identifier = receipt.identifier();

@@ -15,14 +15,14 @@ use crate::log::{CommitLogEntry, CommitLogOperation};
 use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
     Catalog, CommitRequest, DeltaKind, EngineStoredRecord, EngineStoredValue, Error,
-    IdentifiedAssertion, IdentifiedMutation, IdentifiedMutationReceipt, IdentifiedQueryPlan,
-    IdentifiedQuerySnapshot, IdentifiedRecord, IdentifiedRetraction, IdentifiedTableDescriptor,
-    IdentifiedTableReference, InitialSnapshot, KeyedAssertion, KeyedMutation, QueryPlan,
-    QuerySnapshot, RecordIdentifier, Result, Retraction, SequenceRange, SnapshotIdentifier,
-    SubscriptionHandle, SubscriptionIdentifier, SubscriptionReceipt, SubscriptionRegistration,
-    SubscriptionSink, TableDescriptor, TableName, TableReference, TableRegistration,
-    VersionedCommitLogEntry, VersionedLogOperation, VersionedPayload, VersioningPolicy,
-    WriteOperation,
+    FamilyIdentity, IdentifiedAssertion, IdentifiedMutation, IdentifiedMutationReceipt,
+    IdentifiedQueryPlan, IdentifiedQuerySnapshot, IdentifiedRecord, IdentifiedRetraction,
+    IdentifiedTableDescriptor, IdentifiedTableReference, InitialSnapshot, KeyedAssertion,
+    KeyedMutation, QueryPlan, QuerySnapshot, RecordIdentifier, ReplayReceipt, Result, Retraction,
+    SequenceRange, SnapshotIdentifier, StoreSchemaHash, SubscriptionHandle, SubscriptionIdentifier,
+    SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink, TableDescriptor, TableName,
+    TableReference, TableRegistration, VersionedCommitLogEntry, VersionedLogOperation,
+    VersionedPayload, VersionedReplay, VersioningPolicy, WriteOperation,
 };
 
 const CATALOG: sema::Table<&'static str, TableRegistration> =
@@ -31,6 +31,11 @@ const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine
 const LATEST_COMMIT_SEQUENCE_KEY: &str = "latest_commit_sequence";
 const LATEST_SNAPSHOT_KEY: &str = "latest_snapshot";
 const NEXT_SUBSCRIPTION_KEY: &str = "next_subscription";
+const STORAGE_LAYOUT_KEY: &str = "engine_storage_layout";
+/// Engine-internal storage layout version. Layout 2 introduced typed
+/// family identity in the catalog and versioned log; layout-1 stores
+/// (no layout slot) hard-fail at open instead of decoding garbage.
+const STORAGE_LAYOUT: u64 = 2;
 const COMMIT_LOG: sema::Table<u64, CommitLogEntry> = sema::Table::new("__sema_engine_commit_log");
 const VERSIONED_COMMIT_LOG: sema::Table<u64, VersionedCommitLogEntry> =
     sema::Table::new("__sema_engine_versioned_commit_log");
@@ -49,11 +54,22 @@ pub struct Engine {
 impl Engine {
     pub fn open(request: EngineOpen) -> Result<Self> {
         let storage = sema::Sema::open_with_schema(request.path(), request.schema())?;
-        let registrations = storage
-            .read(|transaction| CATALOG.iter(transaction))?
-            .into_iter()
-            .map(|(_key, registration)| registration)
-            .collect();
+        Self::guard_storage_layout(&storage)?;
+        let registrations = match storage.read(|transaction| CATALOG.iter(transaction)) {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(_key, registration)| registration)
+                .collect(),
+            // A catalog row that no longer decodes is a pre-family-identity
+            // registration; surface the layout break, not a byte error.
+            Err(sema::Error::RkyvDecode { table, .. }) if table == CATALOG.name() => {
+                return Err(Error::StorageLayoutMismatch {
+                    stored: STORAGE_LAYOUT - 1,
+                    expected: STORAGE_LAYOUT,
+                });
+            }
+            Err(other) => return Err(other.into()),
+        };
         let catalog = Catalog::new(registrations);
         Ok(Self {
             storage,
@@ -67,34 +83,40 @@ impl Engine {
         &mut self,
         descriptor: TableDescriptor<RecordValue>,
     ) -> Result<TableReference<RecordValue>> {
-        let registration = TableRegistration::new(descriptor.name());
-        if !self.catalog.is_registered(descriptor.name()) {
-            self.storage.write(|transaction| {
-                CATALOG.insert(transaction, descriptor.name().as_str(), &registration)
-            })?;
-            self.catalog.insert(registration)?;
+        let name = *descriptor.name();
+        match self.family_registration_state(&descriptor.family_identity())? {
+            FamilyRegistration::Existing => {}
+            FamilyRegistration::New(registration) => {
+                self.storage.write(|transaction| {
+                    CATALOG.insert(transaction, name.as_str(), &registration)
+                })?;
+                self.catalog.insert(registration)?;
+            }
         }
-        Ok(TableReference::new(*descriptor.name()))
+        Ok(TableReference::new(name))
     }
 
     pub fn register_identified_table<RecordValue>(
         &mut self,
         descriptor: IdentifiedTableDescriptor<RecordValue>,
     ) -> Result<IdentifiedTableReference<RecordValue>> {
-        let registration = TableRegistration::new(descriptor.name());
-        if !self.catalog.is_registered(descriptor.name()) {
-            let counter_key = descriptor.name().identified_counter_key();
-            self.storage.write(|transaction| {
-                CATALOG.insert(transaction, descriptor.name().as_str(), &registration)?;
-                IDENTIFIED_COUNTERS.insert(
-                    transaction,
-                    counter_key,
-                    &RecordIdentifier::first().value(),
-                )
-            })?;
-            self.catalog.insert(registration)?;
+        let name = *descriptor.name();
+        match self.family_registration_state(&descriptor.family_identity())? {
+            FamilyRegistration::Existing => {}
+            FamilyRegistration::New(registration) => {
+                let counter_key = name.identified_counter_key();
+                self.storage.write(|transaction| {
+                    CATALOG.insert(transaction, name.as_str(), &registration)?;
+                    IDENTIFIED_COUNTERS.insert(
+                        transaction,
+                        counter_key,
+                        &RecordIdentifier::first().value(),
+                    )
+                })?;
+                self.catalog.insert(registration)?;
+            }
         }
-        Ok(IdentifiedTableReference::new(*descriptor.name()))
+        Ok(IdentifiedTableReference::new(name))
     }
 
     pub fn assert_identified<RecordValue>(
@@ -604,6 +626,11 @@ impl Engine {
         let mut effects = Vec::new();
         let mut log_operations = Vec::with_capacity(request.operation_count());
         let mut versioned_operations = Vec::with_capacity(request.operation_count());
+        let versioned_family = if self.versioning_policy.is_some() {
+            Some(self.registered_family(request.table().name())?)
+        } else {
+            None
+        };
         for operation in request.operations() {
             match operation {
                 WriteOperation::Assert(record) => {
@@ -628,10 +655,10 @@ impl Engine {
                         *request.table().name(),
                         Some(key.clone()),
                     ));
-                    if self.versioning_policy.is_some() {
+                    if let Some(family) = versioned_family.as_ref() {
                         versioned_operations.push(VersionedLogOperation::new(
                             SemaOperation::Assert,
-                            *request.table().name(),
+                            family.clone(),
                             Some(key.clone()),
                             self.versioned_record_payload(*request.table().name(), record)?,
                         ));
@@ -660,10 +687,10 @@ impl Engine {
                         *request.table().name(),
                         Some(key.clone()),
                     ));
-                    if self.versioning_policy.is_some() {
+                    if let Some(family) = versioned_family.as_ref() {
                         versioned_operations.push(VersionedLogOperation::new(
                             SemaOperation::Mutate,
-                            *request.table().name(),
+                            family.clone(),
                             Some(key.clone()),
                             self.versioned_record_payload(*request.table().name(), record)?,
                         ));
@@ -688,10 +715,10 @@ impl Engine {
                         *request.table().name(),
                         Some(key.clone()),
                     ));
-                    if self.versioning_policy.is_some() {
+                    if let Some(family) = versioned_family.as_ref() {
                         versioned_operations.push(VersionedLogOperation::new(
                             SemaOperation::Retract,
-                            *request.table().name(),
+                            family.clone(),
                             Some(key.clone()),
                             VersionedPayload::tombstone(),
                         ));
@@ -1077,8 +1104,178 @@ impl Engine {
         self.storage.path()
     }
 
-    pub fn storage_kernel(&self) -> &sema::Sema {
-        &self.storage
+    /// Read-only storage-kernel access for transitional component-local
+    /// tables. There is no write counterpart: every durable write goes
+    /// through the engine's logged choke points, so the commit log
+    /// stays complete. [`StorageReader`] carrying no write affordance
+    /// is the architectural witness.
+    pub fn storage_reader(&self) -> StorageReader<'_> {
+        StorageReader::new(&self.storage)
+    }
+
+    /// The derived store-level schema identity over the current family
+    /// inventory — the value stamped into versioned commit log entries.
+    pub fn store_schema_hash(&self) -> StoreSchemaHash {
+        StoreSchemaHash::from(&self.catalog)
+    }
+
+    /// Fold versioned log entries into the registered family named by
+    /// the replay's table reference. Operations dispatch on family
+    /// identity — family name plus per-family schema hash — so entries
+    /// logged under an earlier table name land in the family's current
+    /// table. Application goes through the public write choke points,
+    /// so the rebuilt store logs its own complete history.
+    pub fn replay_versioned<RecordValue>(
+        &self,
+        replay: VersionedReplay<RecordValue>,
+    ) -> Result<ReplayReceipt>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        self.ensure_registered(replay.table())?;
+        let registered = self.registered_family(replay.table().name())?;
+        let mut applied = 0;
+        let mut skipped = 0;
+        for entry in replay.entries() {
+            for operation in entry.operations() {
+                if !operation.family().shares_family(&registered) {
+                    skipped += 1;
+                    continue;
+                }
+                let key = operation
+                    .key()
+                    .cloned()
+                    .ok_or_else(|| Error::ReplayMissingKey {
+                        family: registered.family().as_str().to_owned(),
+                    })?;
+                match operation.operation() {
+                    SemaOperation::Assert => {
+                        self.assert_keyed(KeyedAssertion::new(
+                            *replay.table(),
+                            key,
+                            self.replayed_record(replay.table(), operation.payload())?,
+                        ))?;
+                    }
+                    SemaOperation::Mutate => {
+                        self.mutate_keyed(KeyedMutation::new(
+                            *replay.table(),
+                            key,
+                            self.replayed_record(replay.table(), operation.payload())?,
+                        ))?;
+                    }
+                    SemaOperation::Retract => {
+                        self.retract(Retraction::new(*replay.table(), key))?;
+                    }
+                    other => {
+                        return Err(Error::ReplayUnsupportedOperation {
+                            operation: other.as_record_head().to_owned(),
+                        });
+                    }
+                }
+                applied += 1;
+            }
+        }
+        Ok(ReplayReceipt::new(applied, skipped))
+    }
+
+    fn replayed_record<RecordValue>(
+        &self,
+        table: &TableReference<RecordValue>,
+        payload: &VersionedPayload,
+    ) -> Result<RecordValue>
+    where
+        RecordValue: EngineStoredValue,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let Some(bytes) = payload.bytes() else {
+            return Err(Error::VersionedPayloadDecode {
+                table: table.name().as_str().to_owned(),
+                message: "operation payload is a tombstone".to_owned(),
+            });
+        };
+        rkyv::from_bytes::<RecordValue, rancor::Error>(bytes).map_err(|source| {
+            Error::VersionedPayloadDecode {
+                table: table.name().as_str().to_owned(),
+                message: source.to_string(),
+            }
+        })
+    }
+
+    fn guard_storage_layout(storage: &sema::Sema) -> Result<()> {
+        let stored = storage.read(|transaction| COUNTERS.get(transaction, STORAGE_LAYOUT_KEY))?;
+        match stored {
+            Some(layout) if layout == STORAGE_LAYOUT => Ok(()),
+            Some(layout) => Err(Error::StorageLayoutMismatch {
+                stored: layout,
+                expected: STORAGE_LAYOUT,
+            }),
+            None => {
+                // No layout slot: either a virgin store or a layout-1
+                // store from before the slot existed. Any engine counter
+                // proves prior engine writes, hence layout 1.
+                let has_engine_history = storage.read(|transaction| {
+                    Ok(COUNTERS
+                        .get(transaction, LATEST_COMMIT_SEQUENCE_KEY)?
+                        .or(COUNTERS.get(transaction, LATEST_SNAPSHOT_KEY)?)
+                        .or(COUNTERS.get(transaction, NEXT_SUBSCRIPTION_KEY)?)
+                        .is_some())
+                })?;
+                if has_engine_history {
+                    return Err(Error::StorageLayoutMismatch {
+                        stored: STORAGE_LAYOUT - 1,
+                        expected: STORAGE_LAYOUT,
+                    });
+                }
+                storage.write(|transaction| {
+                    COUNTERS.insert(transaction, STORAGE_LAYOUT_KEY, &STORAGE_LAYOUT)
+                })?;
+                Ok(())
+            }
+        }
+    }
+
+    fn family_registration_state(&self, identity: &FamilyIdentity) -> Result<FamilyRegistration> {
+        if let Some(stored) = self
+            .catalog
+            .registrations()
+            .iter()
+            .find(|registration| registration.table_name() == identity.table_name())
+        {
+            if stored.identity() != identity {
+                return Err(Error::FamilyIdentityMismatch {
+                    table: identity.table_name().to_owned(),
+                    stored: stored.identity().to_string(),
+                    declared: identity.to_string(),
+                });
+            }
+            return Ok(FamilyRegistration::Existing);
+        }
+        if let Some(bound) = self.catalog.registration_for_family(identity) {
+            return Err(Error::FamilyAlreadyBound {
+                family: identity.family().as_str().to_owned(),
+                existing: bound.table_name().to_owned(),
+                table: identity.table_name().to_owned(),
+            });
+        }
+        Ok(FamilyRegistration::New(TableRegistration::new(
+            identity.clone(),
+        )))
+    }
+
+    fn registered_family(&self, name: &TableName) -> Result<FamilyIdentity> {
+        self.catalog
+            .family_identity(name)
+            .cloned()
+            .ok_or_else(|| Error::TableNotRegistered {
+                table: name.as_str().to_owned(),
+            })
     }
 
     fn next_snapshot(&self) -> Result<SnapshotIdentifier> {
@@ -1235,12 +1432,13 @@ impl Engine {
         if self.versioning_policy.is_none() {
             return Ok(None);
         }
+        let family = self.registered_family(&table_name)?;
         self.versioned_entry(
             commit_sequence,
             snapshot,
             NonEmpty::single(VersionedLogOperation::new(
                 operation,
-                table_name,
+                family,
                 key,
                 self.versioned_record_payload(table_name, record)?,
             )),
@@ -1258,12 +1456,13 @@ impl Engine {
         if self.versioning_policy.is_none() {
             return Ok(None);
         }
+        let family = self.registered_family(&table_name)?;
         self.versioned_entry(
             commit_sequence,
             snapshot,
             NonEmpty::single(VersionedLogOperation::new(
                 operation,
-                table_name,
+                family,
                 key,
                 VersionedPayload::tombstone(),
             )),
@@ -1281,7 +1480,7 @@ impl Engine {
         };
         Ok(Some(VersionedCommitLogEntry::new(
             policy.store_name().clone(),
-            policy.schema_hash(),
+            self.store_schema_hash(),
             commit_sequence,
             snapshot,
             self.latest_versioned_entry_digest()?,
@@ -1316,7 +1515,7 @@ impl Engine {
             .read(|transaction| VERSIONED_COMMIT_LOG.iter(transaction))?
             .into_iter()
             .map(|(_sequence, entry)| entry.entry_digest())
-            .last())
+            .next_back())
     }
 
     fn insert_versioned_entry(
@@ -1328,6 +1527,34 @@ impl Engine {
             VERSIONED_COMMIT_LOG.insert(transaction, entry.commit_sequence().value(), entry)?;
         }
         Ok(())
+    }
+}
+
+/// Outcome of validating a family declaration against the persisted
+/// catalog: the binding already exists with the same identity, or it
+/// is new and carries the registration to persist.
+enum FamilyRegistration {
+    Existing,
+    New(TableRegistration),
+}
+
+/// Read-only handle over the engine's storage kernel for transitional
+/// component-local tables. The type deliberately has no write surface:
+/// durable writes exist only behind the engine's logged choke points.
+pub struct StorageReader<'engine> {
+    storage: &'engine sema::Sema,
+}
+
+impl<'engine> StorageReader<'engine> {
+    fn new(storage: &'engine sema::Sema) -> Self {
+        Self { storage }
+    }
+
+    pub fn read<Row>(
+        &self,
+        body: impl FnOnce(&sema::ReadTransaction) -> sema::Result<Row>,
+    ) -> sema::Result<Row> {
+        self.storage.read(body)
     }
 }
 

@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use crate::RecordIdentifier;
+use crate::{FamilyIdentity, FamilyName, RecordIdentifier, SchemaHash};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TableName {
@@ -21,41 +21,82 @@ impl TableName {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+impl From<TableName> for String {
+    fn from(name: TableName) -> Self {
+        name.as_str().to_owned()
+    }
+}
+
+/// Declaration of a domain-keyed record family: the current table
+/// coordinate plus the typed family identity the engine persists in
+/// its catalog and stamps into every versioned log operation.
+#[derive(Debug, Clone)]
 pub struct TableDescriptor<RecordValue> {
     name: TableName,
+    family: FamilyName,
+    schema_hash: SchemaHash,
     record: PhantomData<RecordValue>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct IdentifiedTableDescriptor<RecordValue> {
     name: TableName,
+    family: FamilyName,
+    schema_hash: SchemaHash,
     record: PhantomData<RecordValue>,
 }
 
 impl<RecordValue> TableDescriptor<RecordValue> {
-    pub const fn new(name: TableName) -> Self {
+    pub fn new(name: TableName, family: FamilyName, schema_hash: SchemaHash) -> Self {
         Self {
             name,
+            family,
+            schema_hash,
             record: PhantomData,
         }
     }
 
     pub fn name(&self) -> &TableName {
         &self.name
+    }
+
+    pub fn family(&self) -> &FamilyName {
+        &self.family
+    }
+
+    pub fn schema_hash(&self) -> SchemaHash {
+        self.schema_hash
+    }
+
+    pub fn family_identity(&self) -> FamilyIdentity {
+        FamilyIdentity::new(self.family.clone(), self.schema_hash, self.name)
     }
 }
 
 impl<RecordValue> IdentifiedTableDescriptor<RecordValue> {
-    pub const fn new(name: TableName) -> Self {
+    pub fn new(name: TableName, family: FamilyName, schema_hash: SchemaHash) -> Self {
         Self {
             name,
+            family,
+            schema_hash,
             record: PhantomData,
         }
     }
 
     pub fn name(&self) -> &TableName {
         &self.name
+    }
+
+    pub fn family(&self) -> &FamilyName {
+        &self.family
+    }
+
+    pub fn schema_hash(&self) -> SchemaHash {
+        self.schema_hash
+    }
+
+    pub fn family_identity(&self) -> FamilyIdentity {
+        FamilyIdentity::new(self.family.clone(), self.schema_hash, self.name)
     }
 }
 
