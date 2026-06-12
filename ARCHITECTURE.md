@@ -33,9 +33,15 @@ redb calls.
   bypass the commit log. Component crates do not depend on `redb`
   directly just to name the read-transaction type
   (`StorageReadTransaction`).
-- `Engine` guards an internal storage layout version. Stores written
-  before typed family identity hard-fail at open with a typed
-  `StorageLayoutMismatch` error instead of decoding garbage.
+- `Engine` guards an internal storage layout version (currently 3).
+  Layout 2 introduced typed family identity; layout 3 added the mirror
+  outbox row beside every versioned entry. Stores written under an
+  older layout hard-fail at open with a typed `StorageLayoutMismatch`
+  error instead of decoding garbage or silently shipping an incomplete
+  mirror history; they are rebuilt through checkpoint import or
+  versioned replay. A rejecting open never writes to the store it
+  rejects — the layout slot is stamped only after every open-time
+  validation passes on a virgin store.
 - `Engine` registers record families before executing database operations.
 - Registration declares typed family identity: every `TableDescriptor` /
   `IdentifiedTableDescriptor` carries a `FamilyName` (the schema
@@ -250,6 +256,31 @@ let engine = Engine::open(open)?;
 let _version_tail = engine.versioned_replay_from_sequence(CommitSequence::new(1))?;
 ```
 
+Versioned stores checkpoint, restore, rebuild, and observe mirror
+durability through the engine-owned fold surface (`directory` is the
+component's `FamilyDirectory` impl):
+
+```rust
+let receipt = engine.checkpoint()?;
+let checkpoint = engine.latest_checkpoint()?.expect("just written");
+let suffix = engine
+    .versioned_replay_from_sequence(checkpoint.metadata().covered().last().next())?;
+
+// Restore into a fresh store opened under the same VersioningPolicy.
+let mut session = fresh_engine.begin_import()?;
+session.ingest_checkpoint(checkpoint)?;
+session.ingest_suffix(suffix);
+let _imported = session.commit(&directory)?;
+
+// Re-derive the materialized tables from the authoritative log.
+let _rebuilt = engine.rebuild_from_log(&directory)?;
+
+// Mirror outbox: the unshipped suffix and the durable shipped cursor.
+let unshipped = engine.unshipped_outbox()?;
+let _outcome = engine.acknowledge_mirror(server_confirmed_head)?;
+let _level = engine.store_durability()?;
+```
+
 This proves the layering: registered record family, single-operation `Assert` /
 `Mutate` / `Retract`, structural multi-operation `commit`, `Match`, `Validate`,
 executable `ReadPlan` nodes for all/key/range reads, typed query-algebra
@@ -280,6 +311,138 @@ engine.retract_identified(IdentifiedRetraction::new(entries, identifier))?;
 
 The numeric identifier and the `CommitSequence` are both engine state.
 Component daemons do not keep a parallel ledger.
+
+## Checkpoint — payload-bearing derived artifact
+
+A checkpoint *digest* verifies a state; a checkpoint *segment*
+restores one. `Engine::checkpoint()` folds the versioned log (on top
+of the latest checkpoint, when one exists) into the canonical view —
+the per-key last-write state in sorted (family, schema hash, key)
+order — and persists two shapes durably in one write transaction:
+
+- `CheckpointMetadata`: checkpoint sequence, store name, derived
+  `StoreSchemaHash`, the `FamilyInventory` (every registered
+  `FamilyIdentity` plus the identified-counter rows), the covered
+  `CommitSequenceRange`, the covered snapshot and covered entry digest
+  (the chain head a continuing suffix must name), the 32-byte blake3
+  `ViewDigest` over the canonical sorted view, the optional previous
+  checkpoint digest, the ordered segment references, and the
+  checkpoint's own blake3 digest over all of it.
+- `CheckpointSegment` rows: consecutive chunks of the sorted view
+  rows, content-addressed by domain-separated blake3. Chunking is
+  deterministic at a fixed byte budget (1 MiB soft), bounding every
+  segment read and write.
+
+**Checkpointing logs no versioned entry.** A checkpoint is a derived
+artifact of the log: the log already contains everything the
+checkpoint folds, so logging the fold would make history describe
+itself. Checkpoint creation advances no `CommitSequence` and no
+snapshot. The same reasoning means checkpoints never truncate the log;
+they bound how much of it a restore or rebuild must refold.
+
+The view digest and the store schema hash deliberately exclude table
+coordinates: a table rename keeps both stable. The fold verifies the
+entry digest chain link by link *and* recomputes each entry digest
+from the entry's own fields, so a tampered entry cannot ride a stored
+digest through the chain.
+
+`Engine::latest_checkpoint()` loads metadata plus segments and
+verifies every content address before returning the portable
+`Checkpoint` artifact.
+
+## Import — engine-owned restore
+
+`Engine::begin_import()` mints an `ImportSession` — the only path to
+the restore surface. It exists only for a fresh store (typed
+`ImportStoreNotFresh` otherwise) and exclusively borrows the engine
+while it lives, so ordinary mutation handlers are structurally unable
+to reach or interleave with it. The session ingests exactly one
+verified `Checkpoint` plus a versioned-log suffix, and `commit`
+applies everything in one write transaction:
+
+- catalog registrations and identified counters restore verbatim from
+  the checkpoint's family inventory;
+- the checkpoint metadata and segments land in the engine's
+  checkpoint tables, so later checkpoints chain from it;
+- each suffix entry inserts verbatim into the versioned log — original
+  sequences, digests, predecessor chain, and tombstones preserved —
+  through the same choke point as live writes, so each gets its
+  mirror outbox row; the metadata commit log entry is derived by
+  projection (`CommitLogEntry::from(&VersionedCommitLogEntry)`);
+- the folded view (checkpoint rows + suffix) materializes directly
+  into the typed family tables through `RowMaterializer`, never
+  through assert/mutate — no double-logging, no re-minted sequences;
+- `CommitSequence` and snapshot cursors land at the last suffix
+  entry's values (or the checkpoint's covered end).
+
+After import, the store's counters, catalog, logs, tombstones, and
+checkpoint rows are indistinguishable from the original at the
+imported range; new writes continue the imported digest chain.
+History covered by the checkpoint is compacted: per-entry rows for
+the covered range exist only on the source, so `durability_of` on a
+covered sequence reports `UnknownCommitSequence` in the restored
+store. The mirror shipped-cursor is deliberately not restored —
+acknowledgement is a transport fact the restore cannot fabricate; the
+mirror re-acknowledges idempotently.
+
+The component supplies a `FamilyDirectory`: its typed knowledge of
+which Rust record type materializes each family. The engine drives
+the fold and owns the transaction; the directory only picks the type
+and calls `RowMaterializer::apply` / `apply_identified`, each of
+which can write only its own row into its own family table.
+
+## Rebuild-from-log — the fold defines the view
+
+`Engine::rebuild_from_log(directory)` re-derives the materialized
+family tables from the authoritative log: fold the latest
+checkpoint's rows (when one exists) plus the log suffix, then
+re-materialize in one write transaction — tombstone rows first for
+every key the fold touched but did not keep, then the final rows.
+Because every durable write goes through the logged choke points, the
+touched-key set covers every key a materialized table can legally
+hold, so touched-key clearing is a full clear by construction. (A row
+smuggled in behind the engine's back is cleared only if the log ever
+touched its key; rows at never-logged keys cannot exist through any
+engine path.) The rebuild writes tables directly inside the engine's
+own transaction and logs nothing — the log remains the single
+history. `replay_versioned` remains the per-family replay surface.
+
+What remains unsupported: `replay_versioned` routes through the
+domain-keyed public choke points, so engine-identified families
+cannot replay through it (replaying an identified assert would
+re-mint identifiers). Identified families restore through checkpoint
+import and rebuild-from-log, which preserve identifiers and counters.
+Checkpoint, import, and rebuild require a complete versioned log: a
+store that wrote history before enabling versioning gets a typed
+`VersionedLogIncomplete` error.
+
+## Mirror outbox and durability levels
+
+Every versioned commit log entry lands with a durable `OutboxEntry`
+row — commit sequence plus entry digest — in the same write
+transaction, at every write choke point (single assert/mutate/retract,
+identified variants, multi-operation commit, and imported suffix
+entries). The unshipped suffix is therefore complete by construction;
+this is what forced storage layout 3.
+
+The typed API for the future mirror actor, library-only — no
+transport, no actor, no network:
+
+- `unshipped_outbox()` — the outbox rows past the durable shipped
+  cursor; the mirror loads the matching versioned entries through
+  `versioned_replay_from_sequence` and ships those.
+- `acknowledge_mirror(MirrorHead)` — records a server-confirmed head
+  (sequence + digest), advancing the durable shipped cursor.
+  Idempotent: a head at or behind the cursor returns
+  `MirrorAcknowledgement::Unchanged`; a head whose digest disagrees
+  with the recorded outbox row is a typed `MirrorHeadForked`; a head
+  with no outbox row is `MirrorHeadUnknown`.
+- `durability_of(CommitSequence)` / `store_durability()` — the typed
+  `Durability` level: `LocalCommitted` (no mirror queue position;
+  stores without versioning never queue), `QueuedForMirror` (outbox
+  row exists, unacknowledged), `ServerCommitted` (covered by the
+  acknowledged head). Server-committed waiting belongs at the
+  component request layer, after the local transaction closes.
 
 ## CommitSequence — durable high-water mark for handover
 

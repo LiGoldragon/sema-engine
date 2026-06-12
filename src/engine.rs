@@ -11,7 +11,14 @@ use sema::{Schema, SchemaVersion};
 use signal_frame::NonEmpty;
 use signal_sema::SemaOperation;
 
+use crate::checkpoint::{
+    Checkpoint, CheckpointMetadata, CheckpointReceipt, CheckpointSegment, CheckpointSequence,
+    CommitSequenceRange, FamilyInventory, IdentifiedCounter, SegmentReference,
+};
+use crate::fold::{CanonicalView, FamilyDirectory, RebuildReceipt, RowMaterializer};
+use crate::import::{ImportReceipt, ImportSession};
 use crate::log::{CommitLogEntry, CommitLogOperation};
+use crate::outbox::{Durability, MirrorAcknowledgement, MirrorHead, OutboxEntry};
 use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
     Catalog, CommitRequest, DeltaKind, EngineStoredRecord, EngineStoredValue, Error,
@@ -31,11 +38,18 @@ const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine
 const LATEST_COMMIT_SEQUENCE_KEY: &str = "latest_commit_sequence";
 const LATEST_SNAPSHOT_KEY: &str = "latest_snapshot";
 const NEXT_SUBSCRIPTION_KEY: &str = "next_subscription";
+const LATEST_CHECKPOINT_KEY: &str = "latest_checkpoint";
 const STORAGE_LAYOUT_KEY: &str = "engine_storage_layout";
 /// Engine-internal storage layout version. Layout 2 introduced typed
-/// family identity in the catalog and versioned log; layout-1 stores
-/// (no layout slot) hard-fail at open instead of decoding garbage.
-const STORAGE_LAYOUT: u64 = 2;
+/// family identity in the catalog and versioned log; layout 3 added
+/// the mirror outbox row beside every versioned entry — a layout-2
+/// store opening under this build would carry versioned entries with
+/// no outbox rows, so a mirror would silently ship an incomplete
+/// history. Older stores hard-fail at open and are rebuilt through
+/// checkpoint import or versioned replay.
+const STORAGE_LAYOUT: u64 = 3;
+/// The layout of stores written before the layout slot existed.
+const LAYOUT_BEFORE_SLOT: u64 = 1;
 const COMMIT_LOG: sema::Table<u64, CommitLogEntry> = sema::Table::new("__sema_engine_commit_log");
 const VERSIONED_COMMIT_LOG: sema::Table<u64, VersionedCommitLogEntry> =
     sema::Table::new("__sema_engine_versioned_commit_log");
@@ -43,6 +57,14 @@ const SUBSCRIPTIONS: sema::Table<u64, SubscriptionRegistration> =
     sema::Table::new("__sema_engine_subscriptions");
 const IDENTIFIED_COUNTERS: sema::Table<String, u64> =
     sema::Table::new("__sema_engine_identified_counters");
+const CHECKPOINTS: sema::Table<u64, CheckpointMetadata> =
+    sema::Table::new("__sema_engine_checkpoints");
+const CHECKPOINT_SEGMENTS: sema::Table<&'static [u8; 32], CheckpointSegment> =
+    sema::Table::new("__sema_engine_checkpoint_segments");
+const OUTBOX: sema::Table<u64, OutboxEntry> = sema::Table::new("__sema_engine_outbox");
+const MIRROR_CURSOR: sema::Table<&'static str, MirrorHead> =
+    sema::Table::new("__sema_engine_mirror_cursor");
+const MIRROR_SHIPPED_KEY: &str = "shipped";
 
 pub struct Engine {
     storage: sema::Sema,
@@ -54,7 +76,9 @@ pub struct Engine {
 impl Engine {
     pub fn open(request: EngineOpen) -> Result<Self> {
         let storage = sema::Sema::open_with_schema(request.path(), request.schema())?;
-        Self::guard_storage_layout(&storage)?;
+        // Every validation runs before the first engine write: an open
+        // that rejects a store must not mutate the store it rejects.
+        let stamped_layout = Self::validated_storage_layout(&storage)?;
         let registrations = match storage.read(|transaction| CATALOG.iter(transaction)) {
             Ok(rows) => rows
                 .into_iter()
@@ -64,12 +88,17 @@ impl Engine {
             // registration; surface the layout break, not a byte error.
             Err(sema::Error::RkyvDecode { table, .. }) if table == CATALOG.name() => {
                 return Err(Error::StorageLayoutMismatch {
-                    stored: STORAGE_LAYOUT - 1,
+                    stored: LAYOUT_BEFORE_SLOT,
                     expected: STORAGE_LAYOUT,
                 });
             }
             Err(other) => return Err(other.into()),
         };
+        if stamped_layout.is_none() {
+            storage.write(|transaction| {
+                COUNTERS.insert(transaction, STORAGE_LAYOUT_KEY, &STORAGE_LAYOUT)
+            })?;
+        }
         let catalog = Catalog::new(registrations);
         Ok(Self {
             storage,
@@ -1195,9 +1224,8 @@ impl Engine {
             >,
     {
         let Some(bytes) = payload.bytes() else {
-            return Err(Error::VersionedPayloadDecode {
+            return Err(Error::ReplayTombstonePayload {
                 table: table.name().as_str().to_owned(),
-                message: "operation payload is a tombstone".to_owned(),
             });
         };
         rkyv::from_bytes::<RecordValue, rancor::Error>(bytes).map_err(|source| {
@@ -1208,10 +1236,464 @@ impl Engine {
         })
     }
 
-    fn guard_storage_layout(storage: &sema::Sema) -> Result<()> {
+    /// Write a checkpoint with payload: fold the versioned log (on
+    /// top of the latest checkpoint, when one exists) into the
+    /// canonical view, chunk the sorted rows into content-addressed
+    /// segments, and persist metadata plus segments durably in one
+    /// write transaction.
+    ///
+    /// A checkpoint is a derived artifact of the versioned log — it
+    /// logs no versioned entry and advances no commit sequence. The
+    /// log already contains everything the checkpoint folds; logging
+    /// the fold would make history describe itself.
+    pub fn checkpoint(&self) -> Result<CheckpointReceipt> {
+        let policy = self
+            .versioning_policy
+            .as_ref()
+            .ok_or_else(|| Error::versioning_not_enabled("checkpoint"))?;
+        self.ensure_versioned_log_complete()?;
+        let previous = self.latest_checkpoint()?;
+        let (previous_rows, previous_metadata) = match previous {
+            Some(checkpoint) => (checkpoint.rows(), Some(checkpoint.metadata().clone())),
+            None => (Vec::new(), None),
+        };
+        let after = previous_metadata
+            .as_ref()
+            .map(|metadata| metadata.covered().last())
+            .unwrap_or_else(crate::CommitSequence::genesis);
+        let entries: Vec<VersionedCommitLogEntry> = self
+            .versioned_commit_log()?
+            .into_iter()
+            .filter(|entry| entry.commit_sequence() > after)
+            .collect();
+        let (Some(first_entry), Some(last_entry)) = (entries.first(), entries.last()) else {
+            return Err(Error::CheckpointNothingToCover);
+        };
+        let chain_head = previous_metadata
+            .as_ref()
+            .map(CheckpointMetadata::covered_entry_digest);
+        let covered = CommitSequenceRange::new(
+            previous_metadata
+                .as_ref()
+                .map(|metadata| metadata.covered().first())
+                .unwrap_or_else(|| first_entry.commit_sequence()),
+            last_entry.commit_sequence(),
+        );
+        let covered_snapshot = last_entry.snapshot();
+        let covered_entry_digest = last_entry.entry_digest();
+        let sequence = previous_metadata
+            .as_ref()
+            .map(|metadata| metadata.sequence().next())
+            .unwrap_or_else(CheckpointSequence::first);
+        let previous_checkpoint_digest = previous_metadata
+            .as_ref()
+            .map(CheckpointMetadata::checkpoint_digest);
+
+        let view = CanonicalView::fold(&previous_rows, &entries, chain_head)?;
+        let view_digest = view.digest();
+        let inventory_families = self.family_inventory();
+        let materialize = view.into_rows(&inventory_families)?;
+        let segments = CheckpointSegment::chunk(materialize.rows());
+        let references: Vec<SegmentReference> =
+            segments.iter().map(CheckpointSegment::reference).collect();
+        let row_count = materialize.rows().len();
+
+        let metadata = CheckpointMetadata::new(
+            sequence,
+            policy.store_name().clone(),
+            self.store_schema_hash(),
+            FamilyInventory::new(inventory_families, self.identified_counter_inventory()?),
+            covered,
+            covered_snapshot,
+            covered_entry_digest,
+            view_digest,
+            previous_checkpoint_digest,
+            references,
+        );
+        let checkpoint_digest = metadata.checkpoint_digest();
+        self.storage.write(|transaction| {
+            CHECKPOINTS.insert(transaction, sequence.value(), &metadata)?;
+            for segment in &segments {
+                let digest = segment.digest();
+                CHECKPOINT_SEGMENTS.insert(transaction, digest.bytes(), segment)?;
+            }
+            COUNTERS.insert(transaction, LATEST_CHECKPOINT_KEY, &sequence.value())
+        })?;
+
+        Ok(CheckpointReceipt::new(
+            sequence,
+            covered,
+            view_digest,
+            checkpoint_digest,
+            segments.len(),
+            row_count,
+        ))
+    }
+
+    /// Load the latest stored checkpoint — metadata plus segments —
+    /// verifying every content address before returning it. This is
+    /// the portable restore artifact an [`ImportSession`] ingests on
+    /// the receiving side.
+    pub fn latest_checkpoint(&self) -> Result<Option<Checkpoint>> {
+        let Some(sequence) = self
+            .storage
+            .read(|transaction| COUNTERS.get(transaction, LATEST_CHECKPOINT_KEY))?
+        else {
+            return Ok(None);
+        };
+        let metadata = self
+            .storage
+            .read(|transaction| CHECKPOINTS.get(transaction, sequence))?
+            .ok_or(Error::CheckpointRowMissing { sequence })?;
+        let mut segments = Vec::with_capacity(metadata.segments().len());
+        for reference in metadata.segments() {
+            let digest = reference.digest();
+            let segment = self
+                .storage
+                .read(|transaction| CHECKPOINT_SEGMENTS.get(transaction, digest.bytes()))?
+                .ok_or(Error::SegmentMissing { digest })?;
+            segments.push(segment);
+        }
+        let checkpoint = Checkpoint::new(metadata, segments);
+        checkpoint.verify()?;
+        Ok(Some(checkpoint))
+    }
+
+    /// Rebuild the materialized family tables from the authoritative
+    /// versioned log: the fold *is* the definition of the view. Folds
+    /// the latest checkpoint's rows (when one exists) plus the log
+    /// suffix, then re-materializes every folded row in one write
+    /// transaction — tombstones first for every key the fold touched
+    /// but did not keep, then the final rows. Since every durable
+    /// write goes through the logged choke points, the touched-key
+    /// set covers every key a materialized table can legally hold.
+    ///
+    /// Materialization writes tables directly inside the engine's own
+    /// transaction; it does not route through assert/mutate, so the
+    /// rebuild logs nothing and the log remains the single history.
+    pub fn rebuild_from_log(&self, directory: &dyn FamilyDirectory) -> Result<RebuildReceipt> {
+        if self.versioning_policy.is_none() {
+            return Err(Error::versioning_not_enabled("rebuild_from_log"));
+        }
+        self.ensure_versioned_log_complete()?;
+        let checkpoint = self.latest_checkpoint()?;
+        let (checkpoint_rows, chain_head, after) = match &checkpoint {
+            Some(checkpoint) => (
+                checkpoint.rows(),
+                Some(checkpoint.metadata().covered_entry_digest()),
+                checkpoint.metadata().covered().last(),
+            ),
+            None => (Vec::new(), None, crate::CommitSequence::genesis()),
+        };
+        let entries: Vec<VersionedCommitLogEntry> = self
+            .versioned_commit_log()?
+            .into_iter()
+            .filter(|entry| entry.commit_sequence() > after)
+            .collect();
+        let view = CanonicalView::fold(&checkpoint_rows, &entries, chain_head)?;
+        let view_digest = view.digest();
+        let materialize = view.into_rows(&self.family_inventory())?;
+        self.storage.write(|transaction| {
+            for row in materialize.iter() {
+                directory
+                    .materialize(RowMaterializer::new(transaction, row.clone()))
+                    .map_err(Error::into_storage)?;
+            }
+            Ok(())
+        })?;
+        Ok(RebuildReceipt::new(
+            view_digest,
+            materialize.rows().len(),
+            materialize.cleared().len(),
+            entries.len(),
+        ))
+    }
+
+    /// Mint the engine-owned import session for restoring a fresh
+    /// store from a checkpoint plus versioned-log suffix. The session
+    /// is the only path to the import surface, and while it lives it
+    /// exclusively borrows the engine — ordinary mutation handlers
+    /// are structurally unable to reach or interleave with it.
+    pub fn begin_import(&mut self) -> Result<ImportSession<'_>> {
+        if self.versioning_policy.is_none() {
+            return Err(Error::versioning_not_enabled("import"));
+        }
+        self.ensure_fresh_for_import()?;
+        Ok(ImportSession::new(self))
+    }
+
+    pub(crate) fn apply_import(
+        &mut self,
+        checkpoint: Checkpoint,
+        suffix: Vec<VersionedCommitLogEntry>,
+        directory: &dyn FamilyDirectory,
+    ) -> Result<ImportReceipt> {
+        let policy = self
+            .versioning_policy
+            .as_ref()
+            .ok_or_else(|| Error::versioning_not_enabled("import"))?;
+        let metadata = checkpoint.metadata().clone();
+        if metadata.store_name() != policy.store_name() {
+            return Err(Error::ImportStoreNameMismatch {
+                checkpoint: metadata.store_name().as_str().to_owned(),
+                policy: policy.store_name().as_str().to_owned(),
+            });
+        }
+        // The stamped store schema hash must derive from the carried
+        // family inventory; a doctored artifact cannot smuggle a
+        // mismatched identity past the digest over both.
+        let derived = StoreSchemaHash::from(metadata.family_inventory().families());
+        if derived != metadata.store_schema_hash() {
+            return Err(Error::CheckpointSchemaMismatch {
+                checkpoint: metadata.store_schema_hash(),
+                current: derived,
+            });
+        }
+        self.ensure_fresh_for_import()?;
+
+        // Fold checkpoint rows plus suffix, verifying the recomputed
+        // digest chain from the checkpoint's covered head.
+        let view = CanonicalView::fold(
+            &checkpoint.rows(),
+            &suffix,
+            Some(metadata.covered_entry_digest()),
+        )?;
+        let view_digest = view.digest();
+        let materialize = view.into_rows(metadata.family_inventory().families())?;
+        let (commit_sequence, snapshot) = match suffix.last() {
+            Some(entry) => (entry.commit_sequence(), entry.snapshot()),
+            None => (metadata.covered().last(), metadata.covered_snapshot()),
+        };
+        let registrations: Vec<TableRegistration> = metadata
+            .family_inventory()
+            .families()
+            .iter()
+            .map(|identity| TableRegistration::new(identity.clone()))
+            .collect();
+
+        self.storage.write(|transaction| {
+            for registration in &registrations {
+                CATALOG.insert(transaction, registration.table_name(), registration)?;
+            }
+            for counter in metadata.family_inventory().identified_counters() {
+                IDENTIFIED_COUNTERS.insert(
+                    transaction,
+                    counter.counter_key(),
+                    &counter.next_identifier(),
+                )?;
+            }
+            CHECKPOINTS.insert(transaction, metadata.sequence().value(), &metadata)?;
+            for segment in checkpoint.segments() {
+                let digest = segment.digest();
+                CHECKPOINT_SEGMENTS.insert(transaction, digest.bytes(), segment)?;
+            }
+            COUNTERS.insert(
+                transaction,
+                LATEST_CHECKPOINT_KEY,
+                &metadata.sequence().value(),
+            )?;
+            for entry in &suffix {
+                Self::insert_versioned_row(transaction, entry)?;
+                COMMIT_LOG.insert(
+                    transaction,
+                    entry.commit_sequence().value(),
+                    &CommitLogEntry::from(entry),
+                )?;
+            }
+            COUNTERS.insert(
+                transaction,
+                LATEST_COMMIT_SEQUENCE_KEY,
+                &commit_sequence.value(),
+            )?;
+            COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
+            for row in materialize.iter() {
+                directory
+                    .materialize(RowMaterializer::new(transaction, row.clone()))
+                    .map_err(Error::into_storage)?;
+            }
+            Ok(())
+        })?;
+        for registration in registrations {
+            self.catalog.insert(registration)?;
+        }
+
+        Ok(ImportReceipt::new(
+            metadata.covered(),
+            suffix.len(),
+            view_digest,
+            materialize.rows().len(),
+            commit_sequence,
+            snapshot,
+        ))
+    }
+
+    /// The unshipped outbox suffix: every outbox row past the durable
+    /// shipped cursor, in commit order. A mirror actor loads the
+    /// matching versioned entries through
+    /// [`Self::versioned_replay_from_sequence`] and ships those.
+    pub fn unshipped_outbox(&self) -> Result<Vec<OutboxEntry>> {
+        let after = self
+            .mirror_head()?
+            .map(|head| head.commit_sequence())
+            .unwrap_or_else(crate::CommitSequence::genesis);
+        Ok(self
+            .storage
+            .read(|transaction| OUTBOX.iter(transaction))?
+            .into_iter()
+            .map(|(_sequence, row)| row)
+            .filter(|row| row.commit_sequence() > after)
+            .collect())
+    }
+
+    /// The durable shipped cursor: the last server-confirmed mirror
+    /// head, if any acknowledgement has landed.
+    pub fn mirror_head(&self) -> Result<Option<MirrorHead>> {
+        Ok(self
+            .storage
+            .read(|transaction| MIRROR_CURSOR.get(transaction, MIRROR_SHIPPED_KEY))?)
+    }
+
+    /// Record a server-confirmed mirror head, advancing the durable
+    /// shipped cursor. Idempotent: a head at or behind the cursor is
+    /// a typed no-op. A head naming a sequence with no outbox row is
+    /// [`Error::MirrorHeadUnknown`]; a head whose digest disagrees
+    /// with the recorded outbox row is [`Error::MirrorHeadForked`].
+    pub fn acknowledge_mirror(&self, head: MirrorHead) -> Result<MirrorAcknowledgement> {
+        let sequence = head.commit_sequence();
+        let (recorded, logged) = self.storage.read(|transaction| {
+            Ok((
+                OUTBOX.get(transaction, sequence.value())?,
+                VERSIONED_COMMIT_LOG.get(transaction, sequence.value())?,
+            ))
+        })?;
+        let recorded = recorded.ok_or(Error::MirrorHeadUnknown {
+            sequence: sequence.value(),
+        })?;
+        if logged.is_none_or(|entry| entry.entry_digest() != recorded.entry_digest()) {
+            return Err(Error::OutboxEntryMismatch {
+                sequence: sequence.value(),
+            });
+        }
+        if recorded.entry_digest() != head.entry_digest() {
+            return Err(Error::MirrorHeadForked {
+                sequence: sequence.value(),
+                recorded: recorded.entry_digest(),
+                acknowledged: head.entry_digest(),
+            });
+        }
+        if let Some(current) = self.mirror_head()? {
+            if sequence <= current.commit_sequence() {
+                return Ok(MirrorAcknowledgement::Unchanged(current));
+            }
+        }
+        self.storage
+            .write(|transaction| MIRROR_CURSOR.insert(transaction, MIRROR_SHIPPED_KEY, &head))?;
+        Ok(MirrorAcknowledgement::Advanced(head))
+    }
+
+    /// The durability level of one committed write.
+    pub fn durability_of(&self, sequence: crate::CommitSequence) -> Result<Durability> {
+        let (commit, outbox_row) = self.storage.read(|transaction| {
+            Ok((
+                COMMIT_LOG.get(transaction, sequence.value())?,
+                OUTBOX.get(transaction, sequence.value())?,
+            ))
+        })?;
+        if commit.is_none() {
+            return Err(Error::unknown_commit_sequence(sequence));
+        }
+        let Some(outbox_row) = outbox_row else {
+            return Ok(Durability::LocalCommitted);
+        };
+        match self.mirror_head()? {
+            Some(head) if outbox_row.commit_sequence() <= head.commit_sequence() => {
+                Ok(Durability::ServerCommitted)
+            }
+            _ => Ok(Durability::QueuedForMirror),
+        }
+    }
+
+    /// The durability level of the store's whole state: a store
+    /// without versioning never queues, a versioned store with an
+    /// empty unshipped suffix is fully server-confirmed (an empty
+    /// log is trivially mirrored), and anything unshipped is queued.
+    pub fn store_durability(&self) -> Result<Durability> {
+        if self.versioning_policy.is_none() {
+            return Ok(Durability::LocalCommitted);
+        }
+        if self.unshipped_outbox()?.is_empty() {
+            Ok(Durability::ServerCommitted)
+        } else {
+            Ok(Durability::QueuedForMirror)
+        }
+    }
+
+    /// Every registered family identity, in catalog order.
+    fn family_inventory(&self) -> Vec<FamilyIdentity> {
+        self.catalog
+            .registrations()
+            .iter()
+            .map(|registration| registration.identity().clone())
+            .collect()
+    }
+
+    /// The durable next-record-identifier counters for every
+    /// engine-identified table, recovered from their counter keys.
+    fn identified_counter_inventory(&self) -> Result<Vec<IdentifiedCounter>> {
+        let suffix = format!(":{}", crate::table::IDENTIFIED_COUNTER_SUFFIX);
+        Ok(self
+            .storage
+            .read(|transaction| IDENTIFIED_COUNTERS.iter(transaction))?
+            .into_iter()
+            .filter_map(|(key, next_identifier)| {
+                key.strip_suffix(suffix.as_str())
+                    .map(|table_name| IdentifiedCounter::new(table_name, next_identifier))
+            })
+            .collect())
+    }
+
+    /// Every commit must carry a versioned entry for the fold to be
+    /// the whole state; a store that wrote history before enabling
+    /// versioning cannot checkpoint or rebuild.
+    fn ensure_versioned_log_complete(&self) -> Result<()> {
+        let (commits, versioned) = self.storage.read(|transaction| {
+            Ok((
+                COMMIT_LOG.iter(transaction)?.len() as u64,
+                VERSIONED_COMMIT_LOG.iter(transaction)?.len() as u64,
+            ))
+        })?;
+        if commits != versioned {
+            return Err(Error::VersionedLogIncomplete { commits, versioned });
+        }
+        Ok(())
+    }
+
+    fn ensure_fresh_for_import(&self) -> Result<()> {
+        let fresh = self.catalog.registrations().is_empty()
+            && self.storage.read(|transaction| {
+                Ok(COUNTERS
+                    .get(transaction, LATEST_COMMIT_SEQUENCE_KEY)?
+                    .is_none()
+                    && COUNTERS.get(transaction, LATEST_SNAPSHOT_KEY)?.is_none()
+                    && COUNTERS.get(transaction, LATEST_CHECKPOINT_KEY)?.is_none()
+                    && CATALOG.iter(transaction)?.is_empty()
+                    && COMMIT_LOG.iter(transaction)?.is_empty()
+                    && VERSIONED_COMMIT_LOG.iter(transaction)?.is_empty())
+            })?;
+        if fresh {
+            Ok(())
+        } else {
+            Err(Error::ImportStoreNotFresh)
+        }
+    }
+
+    /// Read and validate the layout slot without writing. Returns the
+    /// stamped layout, or `None` for a virgin store whose slot the
+    /// caller stamps after every other open-time validation passes.
+    fn validated_storage_layout(storage: &sema::Sema) -> Result<Option<u64>> {
         let stored = storage.read(|transaction| COUNTERS.get(transaction, STORAGE_LAYOUT_KEY))?;
         match stored {
-            Some(layout) if layout == STORAGE_LAYOUT => Ok(()),
+            Some(layout) if layout == STORAGE_LAYOUT => Ok(Some(layout)),
             Some(layout) => Err(Error::StorageLayoutMismatch {
                 stored: layout,
                 expected: STORAGE_LAYOUT,
@@ -1229,14 +1711,11 @@ impl Engine {
                 })?;
                 if has_engine_history {
                     return Err(Error::StorageLayoutMismatch {
-                        stored: STORAGE_LAYOUT - 1,
+                        stored: LAYOUT_BEFORE_SLOT,
                         expected: STORAGE_LAYOUT,
                     });
                 }
-                storage.write(|transaction| {
-                    COUNTERS.insert(transaction, STORAGE_LAYOUT_KEY, &STORAGE_LAYOUT)
-                })?;
-                Ok(())
+                Ok(None)
             }
         }
     }
@@ -1524,9 +2003,25 @@ impl Engine {
         entry: &Option<VersionedCommitLogEntry>,
     ) -> sema::Result<()> {
         if let Some(entry) = entry {
-            VERSIONED_COMMIT_LOG.insert(transaction, entry.commit_sequence().value(), entry)?;
+            Self::insert_versioned_row(transaction, entry)?;
         }
         Ok(())
+    }
+
+    /// The single durable choke point for versioned history: every
+    /// versioned commit log entry lands with its mirror outbox row in
+    /// the same write transaction, whether written by a live mutation
+    /// or restored verbatim by an import.
+    fn insert_versioned_row(
+        transaction: &sema::WriteTransaction,
+        entry: &VersionedCommitLogEntry,
+    ) -> sema::Result<()> {
+        VERSIONED_COMMIT_LOG.insert(transaction, entry.commit_sequence().value(), entry)?;
+        OUTBOX.insert(
+            transaction,
+            entry.commit_sequence().value(),
+            &OutboxEntry::from(entry),
+        )
     }
 }
 

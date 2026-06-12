@@ -42,6 +42,21 @@ declared per registered family and the store-level schema hash derives
 from the registered inventory. Remote transport, acknowledgement policy,
 and server storage remain outside this library-only crate.
 
+The fold surface realizes iir4 (quoted above) end to end: the engine
+checkpoints the log into payload-bearing, content-addressed segments
+(a digest verifies; a segment restores), restores a fresh store
+through an engine-owned `ImportSession` that ordinary mutation
+handlers structurally cannot reach, and rebuilds the materialized
+tables from the log on demand — the fold is the definition of the
+view. Per Spirit 29pb: [atomic server-backed durability; state loss
+unacceptable] — every versioned entry lands with a durable mirror
+outbox row in the same write transaction at every choke point, the
+unshipped suffix is complete by construction, server acknowledgement
+advances a durable shipped cursor idempotently with typed
+fork-detection, and durability (`LocalCommitted` / `QueuedForMirror` /
+`ServerCommitted`) is readable per entry and per store. The mirror
+actor, transport, and server stay outside this crate.
+
 The engine surface should follow the architecture of its users instead of
 forcing components to build compatibility shims. Domain-keyed record
 families use `TableDescriptor` and either `EngineRecord::record_key` when

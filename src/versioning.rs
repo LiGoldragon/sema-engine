@@ -123,20 +123,8 @@ impl StoreSchemaHash {
     pub const fn bytes(&self) -> &[u8; 32] {
         &self.0
     }
-}
 
-impl From<&Catalog> for StoreSchemaHash {
-    fn from(catalog: &Catalog) -> Self {
-        let mut inventory: Vec<(&FamilyName, SchemaHash)> = catalog
-            .registrations()
-            .iter()
-            .map(|registration| {
-                (
-                    registration.identity().family(),
-                    registration.identity().schema_hash(),
-                )
-            })
-            .collect();
+    fn from_inventory(mut inventory: Vec<(&FamilyName, SchemaHash)>) -> Self {
         inventory.sort();
         let mut hasher = blake3::Hasher::new();
         EntryDigest::update_bytes(&mut hasher, b"sema-engine-store-schema-hash-v1");
@@ -146,6 +134,43 @@ impl From<&Catalog> for StoreSchemaHash {
             EntryDigest::update_bytes(&mut hasher, schema_hash.bytes());
         }
         Self(*hasher.finalize().as_bytes())
+    }
+}
+
+impl From<&Catalog> for StoreSchemaHash {
+    fn from(catalog: &Catalog) -> Self {
+        Self::from_inventory(
+            catalog
+                .registrations()
+                .iter()
+                .map(|registration| {
+                    (
+                        registration.identity().family(),
+                        registration.identity().schema_hash(),
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
+impl From<&[FamilyIdentity]> for StoreSchemaHash {
+    fn from(families: &[FamilyIdentity]) -> Self {
+        Self::from_inventory(
+            families
+                .iter()
+                .map(|identity| (identity.family(), identity.schema_hash()))
+                .collect(),
+        )
+    }
+}
+
+impl std::fmt::Display for StoreSchemaHash {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in &self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }
 
@@ -188,7 +213,7 @@ impl FamilyIdentity {
         self.family == other.family && self.schema_hash == other.schema_hash
     }
 
-    fn update_digest(&self, hasher: &mut blake3::Hasher) {
+    pub(crate) fn update_digest(&self, hasher: &mut blake3::Hasher) {
         EntryDigest::update_bytes(hasher, self.family.as_str().as_bytes());
         EntryDigest::update_bytes(hasher, self.schema_hash.bytes());
         EntryDigest::update_bytes(hasher, self.table_name.as_bytes());
@@ -229,7 +254,7 @@ impl EntryDigest {
         &self.0
     }
 
-    fn from_entry_fields(
+    pub(crate) fn from_entry_fields(
         store_name: &VersionedStoreName,
         schema_hash: StoreSchemaHash,
         commit_sequence: CommitSequence,
@@ -259,9 +284,18 @@ impl EntryDigest {
         Self(*hasher.finalize().as_bytes())
     }
 
-    fn update_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    pub(crate) fn update_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
+    }
+}
+
+impl std::fmt::Display for EntryDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in &self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }
 
@@ -291,7 +325,7 @@ impl VersionedPayload {
         matches!(self, Self::Tombstone)
     }
 
-    fn update_digest(&self, hasher: &mut blake3::Hasher) {
+    pub(crate) fn update_digest(&self, hasher: &mut blake3::Hasher) {
         match self {
             Self::Record { bytes } => {
                 hasher.update(&[1]);

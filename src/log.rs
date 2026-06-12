@@ -2,7 +2,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use signal_frame::NonEmpty;
 use signal_sema::SemaOperation;
 
-use crate::{CommitSequence, RecordKey, SnapshotIdentifier, TableName};
+use crate::{CommitSequence, RecordKey, SnapshotIdentifier};
 
 /// Durable record of one commit: a request that committed all its
 /// write effects (or none) under a single [`SnapshotIdentifier`]. A single-operation
@@ -60,6 +60,27 @@ impl CommitLogEntry {
     }
 }
 
+/// A versioned commit log entry projects down to its metadata commit
+/// log entry: same sequence and snapshot, payloads dropped. Import
+/// uses this to restore the metadata log beside the verbatim
+/// versioned suffix.
+impl From<&crate::VersionedCommitLogEntry> for CommitLogEntry {
+    fn from(entry: &crate::VersionedCommitLogEntry) -> Self {
+        let head = CommitLogOperation::from(entry.operations().head());
+        let tail = entry
+            .operations()
+            .tail()
+            .iter()
+            .map(CommitLogOperation::from)
+            .collect();
+        Self {
+            commit_sequence: entry.commit_sequence(),
+            snapshot: entry.snapshot(),
+            operations: NonEmpty::from_head_and_tail(head, tail),
+        }
+    }
+}
+
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CommitLogOperation {
     operation: SemaOperation,
@@ -68,10 +89,10 @@ pub struct CommitLogOperation {
 }
 
 impl CommitLogOperation {
-    pub fn new(operation: SemaOperation, table: TableName, key: Option<RecordKey>) -> Self {
+    pub fn new(operation: SemaOperation, table: impl Into<String>, key: Option<RecordKey>) -> Self {
         Self {
             operation,
-            table_name: table.as_str().to_owned(),
+            table_name: table.into(),
             key,
         }
     }
@@ -86,5 +107,18 @@ impl CommitLogOperation {
 
     pub fn key(&self) -> Option<&RecordKey> {
         self.key.as_ref()
+    }
+}
+
+/// A versioned log operation projects down to its metadata commit
+/// log operation: same operation, table coordinate, and key; the
+/// payload drops.
+impl From<&crate::VersionedLogOperation> for CommitLogOperation {
+    fn from(operation: &crate::VersionedLogOperation) -> Self {
+        Self::new(
+            operation.operation(),
+            operation.family().table_name(),
+            operation.key().cloned(),
+        )
     }
 }

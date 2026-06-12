@@ -11,10 +11,14 @@
 //! logged choke points — the storage kernel hands out read access only.
 
 pub mod catalog;
+pub mod checkpoint;
 pub mod engine;
 pub mod error;
+pub mod fold;
+pub mod import;
 pub mod log;
 pub mod mutation;
+pub mod outbox;
 pub mod query;
 pub mod record;
 pub mod sequence;
@@ -24,14 +28,22 @@ pub mod table;
 pub mod versioning;
 
 pub use catalog::{Catalog, TableRegistration};
+pub use checkpoint::{
+    Checkpoint, CheckpointDigest, CheckpointMetadata, CheckpointReceipt, CheckpointSegment,
+    CheckpointSequence, CommitSequenceRange, FamilyInventory, IdentifiedCounter, SegmentDigest,
+    SegmentReference,
+};
 pub use engine::{Engine, EngineOpen, StorageReader};
 pub use error::{Error, Result};
+pub use fold::{FamilyDirectory, RebuildReceipt, RowMaterializer, ViewDigest, ViewRow};
+pub use import::{ImportReceipt, ImportSession};
 pub use log::{CommitLogEntry, CommitLogOperation};
 pub use mutation::{
     Assertion, CommitReceipt, CommitRequest, IdentifiedAssertion, IdentifiedMutation,
     IdentifiedMutationReceipt, IdentifiedRetraction, KeyedAssertion, KeyedMutation, Mutation,
     MutationReceipt, Retraction, WriteOperation,
 };
+pub use outbox::{Durability, MirrorAcknowledgement, MirrorHead, OutboxEntry};
 pub use query::{
     AggregatePlan, FieldSelection, IdentifiedQueryPlan, IdentifiedQuerySnapshot,
     IdentifiedReadPlan, IdentifiedReadPlanNode, KeyRange, PredicatePlan, QueryFilter, QueryPlan,

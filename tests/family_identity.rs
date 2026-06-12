@@ -315,7 +315,70 @@ fn pre_family_identity_store_hard_fails_with_typed_layout_error() {
         error,
         sema_engine::Error::StorageLayoutMismatch {
             stored: 1,
-            expected: 2
+            expected: 3
         }
     ));
+}
+
+#[test]
+fn pre_outbox_layout_store_hard_fails_with_typed_layout_error() {
+    let fixture = Fixture::new();
+    let path = fixture.database_path("layout-two");
+
+    // Simulate a layout-2 store: the layout slot exists at 2, from
+    // before the mirror outbox row joined every versioned entry's
+    // write transaction. Opening it under layout 3 would let a mirror
+    // silently ship an incomplete history, so it hard-fails typed.
+    {
+        const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
+        let schema = sema::Schema {
+            version: SchemaVersion::new(1),
+        };
+        let storage = sema::Sema::open_with_schema(&path, &schema).expect("kernel opens");
+        storage
+            .write(|transaction| COUNTERS.insert(transaction, "engine_storage_layout", &2))
+            .expect("layout-2 slot writes");
+    }
+
+    let Err(error) = Engine::open(EngineOpen::new(path, SchemaVersion::new(1))) else {
+        panic!("layout-2 store must be rejected");
+    };
+
+    assert!(matches!(
+        error,
+        sema_engine::Error::StorageLayoutMismatch {
+            stored: 2,
+            expected: 3
+        }
+    ));
+}
+
+#[test]
+fn rejected_open_does_not_stamp_the_store_it_rejects() {
+    let fixture = Fixture::new();
+    let path = fixture.database_path("rejected-open");
+    const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
+    let schema = sema::Schema {
+        version: SchemaVersion::new(1),
+    };
+
+    // A layout-1 store: engine history without a layout slot.
+    {
+        let storage = sema::Sema::open_with_schema(&path, &schema).expect("kernel opens");
+        storage
+            .write(|transaction| COUNTERS.insert(transaction, "latest_commit_sequence", &7))
+            .expect("legacy counter writes");
+    }
+
+    let Err(_error) = Engine::open(EngineOpen::new(path.clone(), SchemaVersion::new(1))) else {
+        panic!("legacy store must be rejected");
+    };
+
+    // The rejecting open must not have stamped a layout slot into the
+    // store it rejected.
+    let storage = sema::Sema::open_with_schema(&path, &schema).expect("kernel reopens");
+    let stamped = storage
+        .read(|transaction| COUNTERS.get(transaction, "engine_storage_layout"))
+        .expect("layout slot reads");
+    assert_eq!(stamped, None);
 }

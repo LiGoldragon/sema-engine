@@ -1,13 +1,18 @@
 use thiserror::Error;
 
+use crate::{
+    CheckpointDigest, CommitSequence, EntryDigest, SegmentDigest, StoreSchemaHash, ViewDigest,
+};
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("sema: {0}")]
-    Sema(#[from] sema::Error),
+    Sema(sema::Error),
 
     #[error(
         "engine storage layout {stored} does not match this build's layout {expected}; \
-         the store predates typed family identity and must be rebuilt"
+         the store was written under an older engine layout and must be rebuilt through \
+         checkpoint import or versioned replay"
     )]
     StorageLayoutMismatch { stored: u64, expected: u64 },
 
@@ -57,6 +62,104 @@ pub enum Error {
     #[error("versioned replay does not apply operation {operation}")]
     ReplayUnsupportedOperation { operation: String },
 
+    #[error(
+        "versioned log carries a tombstone payload under a record-bearing operation for table {table}"
+    )]
+    ReplayTombstonePayload { table: String },
+
+    #[error("{surface} requires a versioned store; open the engine with a VersioningPolicy")]
+    VersioningNotEnabled { surface: String },
+
+    #[error(
+        "versioned log is incomplete: {commits} commit log entries but {versioned} versioned \
+         entries; the store wrote history before versioning was enabled"
+    )]
+    VersionedLogIncomplete { commits: u64, versioned: u64 },
+
+    #[error("versioned digest chain breaks at commit sequence {sequence}")]
+    VersionedChainBroken { sequence: u64 },
+
+    #[error("nothing to checkpoint: no versioned entries beyond the covered range")]
+    CheckpointNothingToCover,
+
+    #[error("checkpoint digest mismatch: stored {stored}, computed {computed}")]
+    CheckpointDigestMismatch {
+        stored: CheckpointDigest,
+        computed: CheckpointDigest,
+    },
+
+    #[error("checkpoint segment digest mismatch: referenced {referenced}, computed {computed}")]
+    SegmentDigestMismatch {
+        referenced: SegmentDigest,
+        computed: SegmentDigest,
+    },
+
+    #[error("checkpoint segment is missing from the store: {digest}")]
+    SegmentMissing { digest: SegmentDigest },
+
+    #[error("latest-checkpoint cursor names checkpoint {sequence}, which has no stored row")]
+    CheckpointRowMissing { sequence: u64 },
+
+    #[error("view digest mismatch: expected {expected}, computed {computed}")]
+    ViewDigestMismatch {
+        expected: ViewDigest,
+        computed: ViewDigest,
+    },
+
+    #[error(
+        "checkpoint store schema {checkpoint} does not match the current store schema {current}"
+    )]
+    CheckpointSchemaMismatch {
+        checkpoint: StoreSchemaHash,
+        current: StoreSchemaHash,
+    },
+
+    #[error("import requires a fresh store: this store already carries engine history")]
+    ImportStoreNotFresh,
+
+    #[error("import session has no ingested checkpoint")]
+    ImportMissingCheckpoint,
+
+    #[error("import session already ingested a checkpoint")]
+    ImportCheckpointAlreadyIngested,
+
+    #[error("import store name mismatch: checkpoint names {checkpoint}, policy names {policy}")]
+    ImportStoreNameMismatch { checkpoint: String, policy: String },
+
+    #[error("family {family} is not part of the restored inventory")]
+    FamilyUnknown { family: String },
+
+    #[error(
+        "row for family {family} targets table {expected}, but the directory supplied table {supplied}"
+    )]
+    MaterializeTableMismatch {
+        family: String,
+        expected: String,
+        supplied: String,
+    },
+
+    #[error("identified row key {key} for table {table} is not a record identifier")]
+    MaterializeIdentifierParse { table: String, key: String },
+
+    #[error("no commit log entry at sequence {sequence}")]
+    UnknownCommitSequence { sequence: u64 },
+
+    #[error("outbox row at sequence {sequence} does not match its versioned log entry")]
+    OutboxEntryMismatch { sequence: u64 },
+
+    #[error("mirror head names sequence {sequence}, which has no outbox row")]
+    MirrorHeadUnknown { sequence: u64 },
+
+    #[error(
+        "mirror head fork at sequence {sequence}: outbox recorded {recorded}, \
+         acknowledgement names {acknowledged}"
+    )]
+    MirrorHeadForked {
+        sequence: u64,
+        recorded: EntryDigest,
+        acknowledged: EntryDigest,
+    },
+
     #[error("subscription registry lock poisoned")]
     SubscriptionRegistryPoisoned,
 
@@ -66,5 +169,57 @@ pub enum Error {
     #[error("read plan operator is not implemented yet: {operator:?}")]
     UnsupportedReadPlan { operator: crate::ReadOperator },
 }
+
+impl Error {
+    pub(crate) fn versioning_not_enabled(surface: &str) -> Self {
+        Self::VersioningNotEnabled {
+            surface: surface.to_owned(),
+        }
+    }
+
+    pub(crate) fn unknown_commit_sequence(sequence: CommitSequence) -> Self {
+        Self::UnknownCommitSequence {
+            sequence: sequence.value(),
+        }
+    }
+
+    /// Carry a typed engine error across the storage kernel's
+    /// closure-scoped transaction boundary. The kernel rolls back the
+    /// transaction on `Err`; `From<sema::Error>` unwraps the carried
+    /// engine error back out, so the typed failure survives the round
+    /// trip end to end.
+    pub(crate) fn into_storage(self) -> sema::Error {
+        sema::Error::Io(std::io::Error::other(Carrier(self)))
+    }
+}
+
+impl From<sema::Error> for Error {
+    fn from(error: sema::Error) -> Self {
+        match error {
+            sema::Error::Io(io) if io.get_ref().is_some_and(|inner| inner.is::<Carrier>()) => {
+                let inner = io.into_inner().expect("carrier presence was just checked");
+                inner
+                    .downcast::<Carrier>()
+                    .expect("carrier type was just checked")
+                    .0
+            }
+            other => Self::Sema(other),
+        }
+    }
+}
+
+/// Wrapper smuggling a typed engine error through `sema::Error::Io`
+/// so a failure inside a storage-kernel closure both rolls back the
+/// transaction and resurfaces as the original engine error.
+#[derive(Debug)]
+struct Carrier(Error);
+
+impl std::fmt::Display for Carrier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for Carrier {}
 
 pub type Result<T> = std::result::Result<T, Error>;

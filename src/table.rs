@@ -2,6 +2,11 @@ use std::marker::PhantomData;
 
 use crate::{FamilyIdentity, FamilyName, RecordIdentifier, SchemaHash};
 
+/// Key suffix for one identified table's durable next-record-identifier
+/// counter row. Checkpoint inventories reuse it so an imported store
+/// restores the exact counter keys the original engine wrote.
+pub(crate) const IDENTIFIED_COUNTER_SUFFIX: &str = "next_record_identifier";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TableName {
     value: &'static str,
@@ -17,7 +22,7 @@ impl TableName {
     }
 
     pub fn identified_counter_key(&self) -> String {
-        format!("{}:next_record_identifier", self.value)
+        format!("{}:{IDENTIFIED_COUNTER_SUFFIX}", self.value)
     }
 }
 
