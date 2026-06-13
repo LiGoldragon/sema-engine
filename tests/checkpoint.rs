@@ -246,7 +246,7 @@ fn second_checkpoint_chains_from_the_first_and_extends_coverage() {
     // alpha was retracted after the first checkpoint: the second
     // checkpoint's view keeps only beta.
     assert_eq!(second.row_count(), 1);
-    assert_eq!(checkpoint.rows()[0].key().as_str(), "beta");
+    assert_eq!(checkpoint.rows()[0].key().to_owned_string(), "beta");
 }
 
 #[test]

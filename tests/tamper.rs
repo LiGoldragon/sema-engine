@@ -204,7 +204,7 @@ impl Fixture {
 fn forged_replacement(genuine: &VersionedCommitLogEntry, body: &str) -> VersionedCommitLogEntry {
     let operation = genuine.operations().head();
     let key = operation.key().expect("logged operation is keyed").clone();
-    let payload = rkyv::to_bytes::<rancor::Error>(&Thought::new(key.as_str(), body))
+    let payload = rkyv::to_bytes::<rancor::Error>(&Thought::new(key.to_owned_string(), body))
         .expect("forged payload serializes");
     VersionedCommitLogEntry::new(
         genuine.store_name().clone(),

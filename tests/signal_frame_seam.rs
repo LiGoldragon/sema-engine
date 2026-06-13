@@ -165,7 +165,7 @@ fn signal_frame_submit_payload_lands_as_engine_assert_with_matching_operation() 
     let head = log[0].operations().head();
     assert_eq!(head.operation(), SemaOperation::Assert);
     assert_eq!(head.table_name(), "thoughts");
-    assert_eq!(head.key().map(RecordKey::as_str), Some("alpha"));
+    assert_eq!(head.key().map(RecordKey::to_owned_string).as_deref(), Some("alpha"));
 }
 
 #[test]
@@ -193,7 +193,7 @@ fn signal_frame_replace_payload_lands_as_engine_mutate_with_matching_operation()
     assert_eq!(mutate_entry.snapshot(), snapshot);
     let head = mutate_entry.operations().head();
     assert_eq!(head.table_name(), "thoughts");
-    assert_eq!(head.key().map(RecordKey::as_str), Some("alpha"));
+    assert_eq!(head.key().map(RecordKey::to_owned_string).as_deref(), Some("alpha"));
 
     let read = engine
         .match_records(QueryPlan::key(table, RecordKey::new("alpha")))
@@ -228,7 +228,8 @@ fn signal_frame_retire_payload_lands_as_engine_retract_with_matching_operation()
             .operations()
             .head()
             .key()
-            .map(RecordKey::as_str),
+            .map(RecordKey::to_owned_string)
+            .as_deref(),
         Some("alpha"),
     );
 
@@ -296,14 +297,18 @@ fn signal_frame_multi_payload_request_lands_as_one_ordered_commit_log_entry() {
         "Sema operations preserve payload order: Assert, then Mutate, then Retract",
     );
 
-    let per_operation_keys: Vec<Option<&str>> = entry
+    let per_operation_keys: Vec<Option<String>> = entry
         .operations()
         .iter()
-        .map(|operation| operation.key().map(RecordKey::as_str))
+        .map(|operation| operation.key().map(RecordKey::to_owned_string))
         .collect();
     assert_eq!(
         per_operation_keys,
-        vec![Some("beta"), Some("alpha"), Some("gamma")]
+        vec![
+            Some("beta".to_owned()),
+            Some("alpha".to_owned()),
+            Some("gamma".to_owned())
+        ]
     );
 
     let snapshot = engine

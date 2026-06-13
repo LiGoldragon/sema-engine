@@ -382,27 +382,25 @@ impl<'transaction> RowMaterializer<'transaction> {
             >,
     {
         self.check_table(table.name().as_str())?;
-        if self.row.key.kind() != crate::RecordKeyKind::Domain {
+        let crate::RecordKey::Domain(key) = &self.row.key else {
             return Err(Error::MaterializeKeyKindMismatch {
                 table: table.name().as_str().to_owned(),
                 key: self.row.key.to_owned_string(),
                 expected: "domain",
                 found: "identifier",
             });
-        }
+        };
         match &self.row.payload {
             VersionedPayload::Record { bytes } => {
                 let record = Self::decode::<RecordValue>(bytes, table.name().as_str())?;
-                table.sema_table().insert(
-                    self.transaction,
-                    self.row.key.to_owned_string(),
-                    &record,
-                )?;
+                table
+                    .sema_table()
+                    .insert(self.transaction, key.clone(), &record)?;
             }
             VersionedPayload::Tombstone => {
                 table
                     .sema_table()
-                    .remove(self.transaction, self.row.key.to_owned_string())?;
+                    .remove(self.transaction, key.clone())?;
             }
         }
         Ok(())
@@ -423,16 +421,15 @@ impl<'transaction> RowMaterializer<'transaction> {
             >,
     {
         self.check_table(table.name().as_str())?;
-        let identifier =
-            self.row
-                .key
-                .identifier_value()
-                .ok_or_else(|| Error::MaterializeKeyKindMismatch {
-                    table: table.name().as_str().to_owned(),
-                    key: self.row.key.to_owned_string(),
-                    expected: "identifier",
-                    found: "domain",
-                })?;
+        let crate::RecordKey::Identifier(identifier) = &self.row.key else {
+            return Err(Error::MaterializeKeyKindMismatch {
+                table: table.name().as_str().to_owned(),
+                key: self.row.key.to_owned_string(),
+                expected: "identifier",
+                found: "domain",
+            });
+        };
+        let identifier = *identifier;
         match &self.row.payload {
             VersionedPayload::Record { bytes } => {
                 let record = Self::decode::<RecordValue>(bytes, table.name().as_str())?;

@@ -149,9 +149,6 @@ pub enum Error {
         supplied: String,
     },
 
-    #[error("identified row key {key} for table {table} is not a record identifier")]
-    MaterializeIdentifierParse { table: String, key: String },
-
     #[error("row key {key} for table {table} is a {found} key, expected {expected} key")]
     MaterializeKeyKindMismatch {
         table: String,

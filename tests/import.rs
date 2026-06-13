@@ -255,7 +255,7 @@ fn import_restores_the_normal_query_surface_counters_chain_and_tombstones() {
     assert_eq!(imported_log, suffix);
     let tombstone = imported_log[1].operations().head();
     assert!(tombstone.payload().is_tombstone());
-    assert_eq!(tombstone.key().map(RecordKey::as_str), Some("beta"));
+    assert_eq!(tombstone.key().map(RecordKey::to_owned_string).as_deref(), Some("beta"));
 
     // The restored identified counter never re-mints an identifier
     // the original already allocated — including the retracted one.
