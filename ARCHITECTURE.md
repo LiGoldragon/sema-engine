@@ -33,16 +33,30 @@ redb calls.
   bypass the commit log. Component crates do not depend on `redb`
   directly just to name the read-transaction type
   (`StorageReadTransaction`).
-- `Engine` guards an internal storage layout version (currently 4).
+- `Engine` guards an internal storage layout version (currently 5).
   Layout 2 introduced typed family identity; layout 3 added the mirror
   outbox row beside every versioned entry; layout 4 made `RecordKey`
   carry its domain-key vs identifier kind in the archived log/view
-  shape. Stores written under an older layout hard-fail at open with a
-  typed `StorageLayoutMismatch` error instead of decoding garbage or
-  silently shipping an incomplete mirror history; they are rebuilt
-  through checkpoint import or versioned replay. A rejecting open never
-  writes to the store it rejects — the layout slot is stamped only
-  after every open-time validation passes on a virgin store.
+  shape; layout 5 persists the versioned chain-head digest in its own
+  slot (plus the commit/versioned log counts) so the write path reads
+  the predecessor digest in O(1) instead of scanning the whole log.
+  The layout-4-to-5 bump was additive: it added derived slots without
+  touching the data tables or the versioned-log format. So a layout-4
+  store that opted into versioning (its versioned log is non-empty)
+  upgrades in place at open — the layout-5 derived slots refold from
+  the complete versioned log, verified by recomputation (the open-time
+  refold reuses `CanonicalView::fold`, recomputing every entry digest
+  and verifying the chain link by link from genesis; it never trusts a
+  stored head), then the layout re-stamps to 5. This is a raw-log
+  refold of the derived slots alone — it runs before any component
+  family-to-table registration and materializes no data. A store at an
+  older layout with *no* versioned log still hard-fails at open with a
+  typed `StorageLayoutMismatch` (its derived state is not log-
+  recoverable; the previous-engine migration owns pre-versioning
+  stores), as does a forward skew to an unknown-newer layout. A
+  rejecting open never writes to the store it rejects — every layout
+  plan (stamp a virgin store, refold an older versioned store) is
+  applied only after every open-time validation passes.
 - `Engine` registers record families before executing database operations.
 - Registration declares typed family identity: every `TableDescriptor` /
   `IdentifiedTableDescriptor` carries a `FamilyName` (the schema
@@ -425,6 +439,16 @@ import and rebuild-from-log, which preserve identifiers and counters.
 Checkpoint, import, and rebuild require a complete versioned log: a
 store that wrote history before enabling versioning gets a typed
 `VersionedLogIncomplete` error.
+
+The open-path derived-slot refold (layout-4-to-5 upgrade, above) is a
+narrower, distinct surface from `rebuild_from_log`: it reuses the same
+`CanonicalView::fold` to verify the whole chain by recomputation, but
+it writes only the derived slots (`CHAIN_HEAD` and the log counts) and
+materializes no data tables, so it needs no `FamilyDirectory` and runs
+before any family-to-table registration. The data tables are already
+correct in a layout-4 store (the bump was additive); only the missing
+derived slots are rebuilt. `rebuild_from_log` is the full materialized-
+view rebuild and still requires a directory and a registered inventory.
 
 ## Mirror outbox and durability levels
 

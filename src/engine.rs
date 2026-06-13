@@ -46,8 +46,13 @@ const STORAGE_LAYOUT_KEY: &str = "engine_storage_layout";
 /// `RecordKey` carry its domain-key vs identifier kind; layout 5
 /// persists the versioned chain-head digest in its own slot so the
 /// write path reads the predecessor digest in O(1) instead of scanning
-/// the whole versioned log. Older stores hard-fail at open and are
-/// rebuilt through checkpoint import or versioned replay.
+/// the whole versioned log. A layout-4 store that opted into versioning
+/// (its versioned log is non-empty) upgrades in place at open: the
+/// layout-5 derived slots — CHAIN_HEAD and the log counts — refold from
+/// the complete versioned log, verified by recomputation, since slice
+/// A's bump was additive over the data tables. A store at an older
+/// layout with no versioned log still hard-fails at open and is rebuilt
+/// through checkpoint import or versioned replay.
 const STORAGE_LAYOUT: u64 = 5;
 /// The layout of stores written before the layout slot existed.
 const LAYOUT_BEFORE_SLOT: u64 = 1;
@@ -107,7 +112,7 @@ impl Engine {
         let storage = sema::Sema::open_with_schema(request.path(), request.schema())?;
         // Every validation runs before the first engine write: an open
         // that rejects a store must not mutate the store it rejects.
-        let stamped_layout = Self::validated_storage_layout(&storage)?;
+        let layout_plan = Self::validated_storage_layout(&storage)?;
         let registrations = match storage.read(|transaction| CATALOG.iter(transaction)) {
             Ok(rows) => rows
                 .into_iter()
@@ -123,11 +128,12 @@ impl Engine {
             }
             Err(other) => return Err(other.into()),
         };
-        if stamped_layout.is_none() {
-            storage.write(|transaction| {
-                COUNTERS.insert(transaction, STORAGE_LAYOUT_KEY, &STORAGE_LAYOUT)
-            })?;
-        }
+        // Apply the layout plan only after every read-only validation
+        // passed: a virgin store gets its layout slot stamped; an older
+        // store that opted into versioning refolds the layout-introduced
+        // derived slots from its complete log and re-stamps. Open is
+        // single-threaded, so this is the only writer and needs no lock.
+        Self::apply_layout_plan(&storage, layout_plan)?;
         let catalog = Catalog::new(registrations);
         Ok(Self {
             storage,
@@ -1750,17 +1756,47 @@ impl Engine {
         }
     }
 
-    /// Read and validate the layout slot without writing. Returns the
-    /// stamped layout, or `None` for a virgin store whose slot the
-    /// caller stamps after every other open-time validation passes.
-    fn validated_storage_layout(storage: &sema::Sema) -> Result<Option<u64>> {
+    /// Read and validate the layout slot without writing, returning the
+    /// open-time plan the caller applies after every other validation
+    /// passes. A current-layout store is left alone; a virgin store is
+    /// stamped fresh; an older store that already opted into versioning
+    /// refolds the layout-introduced derived slots from its complete
+    /// log; everything else hard-fails with a typed layout error.
+    fn validated_storage_layout(storage: &sema::Sema) -> Result<LayoutOpenPlan> {
         let stored = storage.read(|transaction| COUNTERS.get(transaction, STORAGE_LAYOUT_KEY))?;
         match stored {
-            Some(layout) if layout == STORAGE_LAYOUT => Ok(Some(layout)),
-            Some(layout) => Err(Error::StorageLayoutMismatch {
+            // Current layout: idempotent open, nothing to do.
+            Some(layout) if layout == STORAGE_LAYOUT => Ok(LayoutOpenPlan::Current),
+            // Forward skew: a layout newer than this build wrote derived
+            // state this engine cannot interpret. Refusing to downgrade
+            // an unknown-newer store is the only safe move.
+            Some(layout) if layout > STORAGE_LAYOUT => Err(Error::StorageLayoutMismatch {
                 stored: layout,
                 expected: STORAGE_LAYOUT,
             }),
+            // Older layout. Slice A's bump to layout 5 was purely
+            // additive — it added the CHAIN_HEAD and log-count derived
+            // slots without touching the data tables or the versioned
+            // log format. So if the store opted into versioning and its
+            // versioned log is non-empty, the missing derived slots are
+            // recomputable from that log alone: refold them and
+            // re-stamp. With no versioned log present this is a
+            // pre-versioning store whose derived state is not log-
+            // recoverable, so it hard-fails (the previous-engine
+            // StoreMigration owns pre-v9 stores); state loss is
+            // unacceptable (Spirit 29pb).
+            Some(layout) => {
+                let versioned_present = storage
+                    .read(|transaction| Ok(!VERSIONED_COMMIT_LOG.iter(transaction)?.is_empty()))?;
+                if versioned_present {
+                    Ok(LayoutOpenPlan::RebuildDerivedSlots)
+                } else {
+                    Err(Error::StorageLayoutMismatch {
+                        stored: layout,
+                        expected: STORAGE_LAYOUT,
+                    })
+                }
+            }
             None => {
                 // No layout slot: either a virgin store or a layout-1
                 // store from before the slot existed. Any engine counter
@@ -1778,9 +1814,65 @@ impl Engine {
                         expected: STORAGE_LAYOUT,
                     });
                 }
-                Ok(None)
+                Ok(LayoutOpenPlan::StampFresh)
             }
         }
+    }
+
+    /// Carry out the open-time layout plan. Runs only after every
+    /// read-only validation passed, so an open that rejects a store
+    /// never mutates the store it rejects.
+    fn apply_layout_plan(storage: &sema::Sema, plan: LayoutOpenPlan) -> Result<()> {
+        match plan {
+            LayoutOpenPlan::Current => Ok(()),
+            LayoutOpenPlan::StampFresh => Ok(storage.write(|transaction| {
+                COUNTERS.insert(transaction, STORAGE_LAYOUT_KEY, &STORAGE_LAYOUT)
+            })?),
+            LayoutOpenPlan::RebuildDerivedSlots => Self::rebuild_derived_slots(storage),
+        }
+    }
+
+    /// Refold the layout-introduced derived slots (the persisted
+    /// chain-head digest and the two log-count counters) from the
+    /// store's complete versioned log, then re-stamp the layout counter
+    /// to the current layout. Verification is by recomputation: the fold
+    /// recomputes every entry digest from the entry's own fields and
+    /// verifies the chain link by link from genesis (`chain_head =
+    /// None`), so the rebuilt head can never trust a stored digest. The
+    /// verified head is the last entry's recomputed digest, identical to
+    /// what a fresh full fold of the same log produces. The data tables
+    /// are already correct (slice A's bump was additive), so this
+    /// touches only the derived slots and needs no family directory —
+    /// CHAIN_HEAD and the counts derive from the raw log alone, before
+    /// any component family-to-table registration.
+    fn rebuild_derived_slots(storage: &sema::Sema) -> Result<()> {
+        let entries: Vec<VersionedCommitLogEntry> = storage
+            .read(|transaction| VERSIONED_COMMIT_LOG.iter(transaction))?
+            .into_iter()
+            .map(|(_sequence, entry)| entry)
+            .collect();
+        // Recompute and verify the whole chain from genesis. A tampered
+        // or forked log surfaces as a typed VersionedChainBroken here,
+        // aborting the open before any derived slot is written.
+        CanonicalView::fold(&[], &entries, None)?;
+        let head = entries.last().map(VersionedCommitLogEntry::entry_digest);
+        let versioned_count = entries.len() as u64;
+        let commit_count = storage
+            .read(|transaction| COMMIT_LOG.iter(transaction))?
+            .len() as u64;
+        Ok(storage.write(|transaction| {
+            match &head {
+                Some(digest) => {
+                    CHAIN_HEAD.insert(transaction, LATEST_ENTRY_DIGEST_KEY, digest)?;
+                }
+                None => {
+                    CHAIN_HEAD.remove(transaction, LATEST_ENTRY_DIGEST_KEY)?;
+                }
+            }
+            COUNTERS.insert(transaction, COMMIT_LOG_COUNT_KEY, &commit_count)?;
+            COUNTERS.insert(transaction, VERSIONED_LOG_COUNT_KEY, &versioned_count)?;
+            COUNTERS.insert(transaction, STORAGE_LAYOUT_KEY, &STORAGE_LAYOUT)
+        })?)
     }
 
     fn family_registration_state(&self, identity: &FamilyIdentity) -> Result<FamilyRegistration> {
@@ -2176,6 +2268,19 @@ impl LogCounts {
 enum FamilyRegistration {
     Existing,
     New(TableRegistration),
+}
+
+/// The open-time storage-layout plan: what an open must do to the store
+/// after every read-only validation has passed. Decided before any
+/// write so a rejected open never mutates the store it rejects.
+enum LayoutOpenPlan {
+    /// The store is already at the current layout — idempotent open.
+    Current,
+    /// A virgin store with no engine history: stamp the layout slot.
+    StampFresh,
+    /// An older versioned store: refold the layout-introduced derived
+    /// slots from its complete log and re-stamp to the current layout.
+    RebuildDerivedSlots,
 }
 
 /// Read-only handle over the engine's storage kernel for transitional

@@ -386,18 +386,19 @@ fn string_record_key_layout_store_hard_fails_with_typed_layout_error() {
 }
 
 #[test]
-fn pre_chain_head_layout_store_hard_fails_with_typed_layout_error() {
+fn layout_four_store_without_versioned_log_hard_fails_with_typed_layout_error() {
     let fixture = Fixture::new();
     let path = fixture.database_path("layout-four");
 
-    // Simulate a layout-4 store: versioned entries carry typed
-    // RecordKey kinds and outbox rows, but the persisted chain-head
-    // digest slot and the log-count counters do not exist yet. Opening
-    // it under layout 5 would read a missing chain head as `None` and
-    // mint a fresh entry off an empty predecessor, forking the
-    // authoritative digest chain — so it hard-fails typed instead. State
-    // loss is unacceptable (Spirit 29pb); the store is rebuilt through
-    // checkpoint import or versioned replay.
+    // Simulate a layout-4 store that never opted into versioning: the
+    // layout slot sits at 4 and no versioned commit log exists, so the
+    // layout-5 derived slots (CHAIN_HEAD and the log counts) are not
+    // recoverable by a log refold. Opening it under layout 5 hard-fails
+    // typed — the missing derived state is not log-derivable, so the
+    // store must be rebuilt through checkpoint import or versioned
+    // replay. (A layout-4 store *with* a versioned log upgrades in
+    // place instead; see tests/layout_rebuild.rs.) State loss is
+    // unacceptable (Spirit 29pb).
     {
         const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
         let schema = sema::Schema {
