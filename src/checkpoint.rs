@@ -5,7 +5,7 @@
 //! the versioned log — writing one logs no versioned entry, because
 //! the log already contains everything the checkpoint folds.
 
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize, rancor};
 
 use crate::fold::{ViewDigest, ViewRow};
 use crate::{
@@ -463,7 +463,7 @@ impl CheckpointMetadata {
 /// One whole checkpoint: the metadata plus its segments in view
 /// order. This is the portable restore artifact an import session
 /// ingests.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
     metadata: CheckpointMetadata,
     segments: Vec<CheckpointSegment>,
@@ -480,6 +480,11 @@ impl Checkpoint {
 
     pub fn segments(&self) -> &[CheckpointSegment] {
         &self.segments
+    }
+
+    /// Serialize this checkpoint into its portable byte artifact.
+    pub fn to_portable(&self) -> Result<PortableCheckpoint> {
+        PortableCheckpoint::from_checkpoint(self)
     }
 
     /// All view rows in view order, concatenated across segments.
@@ -537,6 +542,50 @@ impl Checkpoint {
             });
         }
         Ok(())
+    }
+}
+
+/// Owned byte artifact for moving a checkpoint across processes,
+/// sockets, or repositories. Decoding always verifies the checkpoint
+/// before handing it back to an import path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortableCheckpoint {
+    bytes: Vec<u8>,
+}
+
+impl PortableCheckpoint {
+    pub fn from_checkpoint(checkpoint: &Checkpoint) -> Result<Self> {
+        let bytes = rkyv::to_bytes::<rancor::Error>(checkpoint).map_err(|source| {
+            Error::CheckpointEncode {
+                message: source.to_string(),
+            }
+        })?;
+        Ok(Self {
+            bytes: bytes.into_vec(),
+        })
+    }
+
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    pub fn decode(&self) -> Result<Checkpoint> {
+        let checkpoint =
+            rkyv::from_bytes::<Checkpoint, rancor::Error>(&self.bytes).map_err(|source| {
+                Error::CheckpointDecode {
+                    message: source.to_string(),
+                }
+            })?;
+        checkpoint.verify()?;
+        Ok(checkpoint)
     }
 }
 

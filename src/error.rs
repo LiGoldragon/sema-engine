@@ -82,6 +82,12 @@ pub enum Error {
     #[error("nothing to checkpoint: no versioned entries beyond the covered range")]
     CheckpointNothingToCover,
 
+    #[error("checkpoint encode failed: {message}")]
+    CheckpointEncode { message: String },
+
+    #[error("checkpoint decode failed: {message}")]
+    CheckpointDecode { message: String },
+
     #[error("checkpoint digest mismatch: stored {stored}, computed {computed}")]
     CheckpointDigestMismatch {
         stored: CheckpointDigest,

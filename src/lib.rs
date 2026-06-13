@@ -30,8 +30,8 @@ pub mod versioning;
 pub use catalog::{Catalog, TableRegistration};
 pub use checkpoint::{
     Checkpoint, CheckpointDigest, CheckpointMetadata, CheckpointReceipt, CheckpointSegment,
-    CheckpointSequence, CommitSequenceRange, FamilyInventory, IdentifiedCounter, SegmentDigest,
-    SegmentReference,
+    CheckpointSequence, CommitSequenceRange, FamilyInventory, IdentifiedCounter,
+    PortableCheckpoint, SegmentDigest, SegmentReference,
 };
 pub use engine::{Engine, EngineOpen, StorageReader};
 pub use error::{Error, Result};

@@ -8,9 +8,9 @@ use std::path::PathBuf;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, CommitSequence, Engine, EngineOpen, EngineRecord, FamilyName, Mutation, RecordKey,
-    Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, VersionedStoreName,
-    VersioningPolicy,
+    Assertion, CommitSequence, Engine, EngineOpen, EngineRecord, FamilyName, Mutation,
+    PortableCheckpoint, RecordKey, Retraction, SchemaHash, SchemaVersion, TableDescriptor,
+    TableName, VersionedStoreName, VersioningPolicy,
 };
 use tempfile::TempDir;
 
@@ -144,6 +144,70 @@ fn checkpoint_is_a_derived_artifact_and_logs_no_versioned_entry() {
         engine.commit_log().expect("commit log reads").len(),
         log_before
     );
+}
+
+#[test]
+fn portable_checkpoint_bytes_round_trip_and_verify() {
+    let fixture = Fixture::new();
+    let mut engine = fixture.open_versioned("portable-checkpoint");
+    let thoughts = engine
+        .register_table(fixture.descriptor())
+        .expect("table registers");
+    engine
+        .assert(Assertion::new(thoughts, Thought::new("alpha", "first")))
+        .expect("assert alpha");
+    engine
+        .assert(Assertion::new(thoughts, Thought::new("beta", "second")))
+        .expect("assert beta");
+    engine.checkpoint().expect("checkpoint writes");
+
+    let checkpoint = engine
+        .latest_checkpoint()
+        .expect("checkpoint loads")
+        .expect("checkpoint exists");
+    let portable = checkpoint.to_portable().expect("checkpoint serializes");
+
+    assert!(!portable.as_bytes().is_empty());
+
+    let decoded = portable.decode().expect("portable checkpoint decodes");
+    assert_eq!(decoded.metadata(), checkpoint.metadata());
+    assert_eq!(decoded.segments(), checkpoint.segments());
+    assert_eq!(decoded.rows(), checkpoint.rows());
+}
+
+#[test]
+fn portable_checkpoint_rejects_doctored_bytes() {
+    let fixture = Fixture::new();
+    let mut engine = fixture.open_versioned("portable-checkpoint-tamper");
+    let thoughts = engine
+        .register_table(fixture.descriptor())
+        .expect("table registers");
+    engine
+        .assert(Assertion::new(thoughts, Thought::new("alpha", "first")))
+        .expect("assert alpha");
+    engine.checkpoint().expect("checkpoint writes");
+
+    let checkpoint = engine
+        .latest_checkpoint()
+        .expect("checkpoint loads")
+        .expect("checkpoint exists");
+    let mut bytes = checkpoint
+        .to_portable()
+        .expect("checkpoint serializes")
+        .into_bytes();
+    let midpoint = bytes.len() / 2;
+    bytes[midpoint] ^= 0xff;
+
+    let error = PortableCheckpoint::from_bytes(bytes)
+        .decode()
+        .expect_err("doctored checkpoint is rejected");
+    assert!(matches!(
+        error,
+        sema_engine::Error::CheckpointDecode { .. }
+            | sema_engine::Error::CheckpointDigestMismatch { .. }
+            | sema_engine::Error::SegmentDigestMismatch { .. }
+            | sema_engine::Error::ViewDigestMismatch { .. }
+    ));
 }
 
 #[test]
