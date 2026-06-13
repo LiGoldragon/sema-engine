@@ -16,6 +16,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
     rkyv::Deserialize,
     Debug,
     Clone,
+    Copy,
     PartialEq,
     Eq,
     PartialOrd,
@@ -23,19 +24,83 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
     Hash,
 )]
 #[rkyv(derive(Debug))]
-pub struct RecordKey(String);
+pub enum RecordKeyKind {
+    Domain,
+    Identifier,
+}
+
+impl RecordKeyKind {
+    pub const fn digest_tag(self) -> u8 {
+        match self {
+            Self::Domain => 1,
+            Self::Identifier => 2,
+        }
+    }
+}
+
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
+#[rkyv(derive(Debug))]
+pub struct RecordKey {
+    kind: RecordKeyKind,
+    value: String,
+}
 
 impl RecordKey {
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        Self::domain(value)
+    }
+
+    pub fn domain(value: impl Into<String>) -> Self {
+        Self {
+            kind: RecordKeyKind::Domain,
+            value: value.into(),
+        }
+    }
+
+    pub fn identifier(identifier: RecordIdentifier) -> Self {
+        Self {
+            kind: RecordKeyKind::Identifier,
+            value: identifier.value().to_string(),
+        }
+    }
+
+    pub fn kind(&self) -> RecordKeyKind {
+        self.kind
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.value
     }
 
     pub fn to_owned_string(&self) -> String {
-        self.0.clone()
+        self.value.clone()
+    }
+
+    pub fn identifier_value(&self) -> Option<RecordIdentifier> {
+        if self.kind != RecordKeyKind::Identifier {
+            return None;
+        }
+        self.value.parse().ok().map(RecordIdentifier::new)
+    }
+
+    pub(crate) fn encoded_len(&self) -> usize {
+        1 + self.value.len()
+    }
+
+    pub(crate) fn update_digest(&self, hasher: &mut blake3::Hasher) {
+        hasher.update(&[self.kind.digest_tag()]);
+        crate::EntryDigest::update_bytes(hasher, self.value.as_bytes());
     }
 }
 

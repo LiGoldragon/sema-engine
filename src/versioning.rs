@@ -389,7 +389,7 @@ impl VersionedLogOperation {
         match &self.key {
             Some(key) => {
                 hasher.update(&[1]);
-                EntryDigest::update_bytes(hasher, key.as_str().as_bytes());
+                key.update_digest(hasher);
             }
             None => {
                 hasher.update(&[0]);

@@ -94,7 +94,7 @@ impl ViewRow {
 
     pub(crate) fn update_digest(&self, hasher: &mut blake3::Hasher) {
         self.family.update_digest(hasher);
-        EntryDigest::update_bytes(hasher, self.key.as_str().as_bytes());
+        self.key.update_digest(hasher);
         self.payload.update_digest(hasher);
     }
 }
@@ -225,7 +225,7 @@ impl CanonicalView {
         for (key, payload) in &self.rows {
             EntryDigest::update_bytes(&mut hasher, key.family.as_str().as_bytes());
             EntryDigest::update_bytes(&mut hasher, key.schema_hash.bytes());
-            EntryDigest::update_bytes(&mut hasher, key.key.as_str().as_bytes());
+            key.key.update_digest(&mut hasher);
             EntryDigest::update_bytes(&mut hasher, payload);
         }
         ViewDigest::new(*hasher.finalize().as_bytes())
@@ -382,6 +382,14 @@ impl<'transaction> RowMaterializer<'transaction> {
             >,
     {
         self.check_table(table.name().as_str())?;
+        if self.row.key.kind() != crate::RecordKeyKind::Domain {
+            return Err(Error::MaterializeKeyKindMismatch {
+                table: table.name().as_str().to_owned(),
+                key: self.row.key.to_owned_string(),
+                expected: "domain",
+                found: "identifier",
+            });
+        }
         match &self.row.payload {
             VersionedPayload::Record { bytes } => {
                 let record = Self::decode::<RecordValue>(bytes, table.name().as_str())?;
@@ -401,8 +409,8 @@ impl<'transaction> RowMaterializer<'transaction> {
     }
 
     /// Apply this row to an engine-identified family table. The row
-    /// key is the decimal record identifier the engine minted when
-    /// the operation was logged.
+    /// key is the typed record identifier the engine minted when the
+    /// operation was logged.
     pub fn apply_identified<RecordValue>(
         self,
         table: IdentifiedTableReference<RecordValue>,
@@ -415,24 +423,27 @@ impl<'transaction> RowMaterializer<'transaction> {
             >,
     {
         self.check_table(table.name().as_str())?;
-        let identifier: u64 =
+        let identifier =
             self.row
                 .key
-                .as_str()
-                .parse()
-                .map_err(|_| Error::MaterializeIdentifierParse {
+                .identifier_value()
+                .ok_or_else(|| Error::MaterializeKeyKindMismatch {
                     table: table.name().as_str().to_owned(),
                     key: self.row.key.to_owned_string(),
+                    expected: "identifier",
+                    found: "domain",
                 })?;
         match &self.row.payload {
             VersionedPayload::Record { bytes } => {
                 let record = Self::decode::<RecordValue>(bytes, table.name().as_str())?;
                 table
                     .sema_table()
-                    .insert(self.transaction, identifier, &record)?;
+                    .insert(self.transaction, identifier.value(), &record)?;
             }
             VersionedPayload::Tombstone => {
-                table.sema_table().remove(self.transaction, identifier)?;
+                table
+                    .sema_table()
+                    .remove(self.transaction, identifier.value())?;
             }
         }
         Ok(())

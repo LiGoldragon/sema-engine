@@ -33,15 +33,16 @@ redb calls.
   bypass the commit log. Component crates do not depend on `redb`
   directly just to name the read-transaction type
   (`StorageReadTransaction`).
-- `Engine` guards an internal storage layout version (currently 3).
+- `Engine` guards an internal storage layout version (currently 4).
   Layout 2 introduced typed family identity; layout 3 added the mirror
-  outbox row beside every versioned entry. Stores written under an
-  older layout hard-fail at open with a typed `StorageLayoutMismatch`
-  error instead of decoding garbage or silently shipping an incomplete
-  mirror history; they are rebuilt through checkpoint import or
-  versioned replay. A rejecting open never writes to the store it
-  rejects — the layout slot is stamped only after every open-time
-  validation passes on a virgin store.
+  outbox row beside every versioned entry; layout 4 made `RecordKey`
+  carry its domain-key vs identifier kind in the archived log/view
+  shape. Stores written under an older layout hard-fail at open with a
+  typed `StorageLayoutMismatch` error instead of decoding garbage or
+  silently shipping an incomplete mirror history; they are rebuilt
+  through checkpoint import or versioned replay. A rejecting open never
+  writes to the store it rejects — the layout slot is stamped only
+  after every open-time validation passes on a virgin store.
 - `Engine` registers record families before executing database operations.
 - Registration declares typed family identity: every `TableDescriptor` /
   `IdentifiedTableDescriptor` carries a `FamilyName` (the schema
@@ -57,6 +58,11 @@ redb calls.
 - Engine-identified record families use `IdentifiedTableDescriptor` /
   `IdentifiedTableReference`; `Engine` allocates durable numeric
   `RecordIdentifier` values and persists the next-identifier counter.
+- `RecordKey` is a typed sum at the log/view boundary: domain-keyed
+  writes carry `RecordKeyKind::Domain`, while identified-family writes
+  carry `RecordKeyKind::Identifier`. Their display/storage text may
+  match (for example domain key `1` and identifier `1`), but their
+  versioned-log digests and canonical view keys remain distinct.
 - Engine-identified record families support `Assert`, `Mutate`, `Retract`,
   and `Match` while preserving the engine-assigned `RecordIdentifier`.
 - `Assert` writes records through a registered record family.
@@ -343,7 +349,9 @@ snapshot. The same reasoning means checkpoints never truncate the log;
 they bound how much of it a restore or rebuild must refold.
 
 The view digest and the store schema hash deliberately exclude table
-coordinates: a table rename keeps both stable. The fold verifies the
+coordinates: a table rename keeps both stable. The view digest includes
+the `RecordKeyKind` tag, so domain keys and engine identifiers do not
+collapse just because their text is the same. The fold verifies the
 entry digest chain link by link *and* recomputes each entry digest
 from the entry's own fields, so a tampered entry cannot ride a stored
 digest through the chain.
@@ -425,7 +433,8 @@ row — commit sequence plus entry digest — in the same write
 transaction, at every write choke point (single assert/mutate/retract,
 identified variants, multi-operation commit, and imported suffix
 entries). The unshipped suffix is therefore complete by construction;
-this is what forced storage layout 3.
+this is what forced storage layout 3. Layout 4 follows from the key
+kind split in the versioned log and checkpoint view.
 
 The typed API for the future mirror actor, library-only — no
 transport, no actor, no network:

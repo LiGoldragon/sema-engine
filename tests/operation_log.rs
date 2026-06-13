@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize, rancor};
 use sema_engine::{
     Assertion, CommitRequest, CommitSequence, Engine, EngineOpen, EngineRecord, FamilyName,
-    QueryPlan, RecordKey, Retraction, SchemaHash, SchemaVersion, SnapshotIdentifier,
-    TableDescriptor, TableName, VersionedPayload, VersionedStoreName, VersioningPolicy,
+    IdentifiedAssertion, IdentifiedTableDescriptor, QueryPlan, RecordKey, RecordKeyKind,
+    Retraction, SchemaHash, SchemaVersion, SnapshotIdentifier, TableDescriptor, TableName,
+    VersionedPayload, VersionedStoreName, VersioningPolicy,
 };
 use signal_sema::SemaOperation;
 use tempfile::TempDir;
@@ -68,12 +69,69 @@ impl LogFixture {
         )
     }
 
+    fn identified_descriptor(&self) -> IdentifiedTableDescriptor<LoggedRecord> {
+        IdentifiedTableDescriptor::new(
+            TableName::new("identified_logged_records"),
+            FamilyName::new("identified-logged-record"),
+            SchemaHash::for_label("identified-logged-record-v1"),
+        )
+    }
+
     fn decode_payload(&self, payload: &VersionedPayload) -> LoggedRecord {
         rkyv::from_bytes::<LoggedRecord, rancor::Error>(
             payload.bytes().expect("payload carries record bytes"),
         )
         .expect("payload decodes")
     }
+}
+
+#[test]
+fn record_key_kind_distinguishes_domain_keys_from_engine_identifiers() {
+    let fixture = LogFixture::new();
+    let mut engine = fixture.open_versioned_engine();
+    let domain_records = engine
+        .register_table(fixture.descriptor())
+        .expect("domain table registers");
+    let identified_records = engine
+        .register_identified_table(fixture.identified_descriptor())
+        .expect("identified table registers");
+
+    engine
+        .assert(Assertion::new(
+            domain_records,
+            LoggedRecord::new("1", "domain one"),
+        ))
+        .expect("domain assert succeeds");
+    let identified = engine
+        .assert_identified(IdentifiedAssertion::new(
+            identified_records,
+            LoggedRecord::new("ignored", "identified one"),
+        ))
+        .expect("identified assert succeeds");
+
+    let log = engine
+        .versioned_commit_log()
+        .expect("versioned commit log reads");
+    let domain_key = log[0]
+        .operations()
+        .head()
+        .key()
+        .expect("domain operation carries key");
+    let identified_key = log[1]
+        .operations()
+        .head()
+        .key()
+        .expect("identified operation carries key");
+
+    assert_eq!(domain_key.as_str(), "1");
+    assert_eq!(domain_key.kind(), RecordKeyKind::Domain);
+    assert_eq!(identified_key.as_str(), "1");
+    assert_eq!(identified_key.kind(), RecordKeyKind::Identifier);
+    assert_eq!(
+        identified_key.identifier_value(),
+        Some(identified.identifier())
+    );
+    assert_ne!(domain_key, identified_key);
 }
 
 #[test]

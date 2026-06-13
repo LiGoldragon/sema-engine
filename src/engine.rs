@@ -42,12 +42,11 @@ const LATEST_CHECKPOINT_KEY: &str = "latest_checkpoint";
 const STORAGE_LAYOUT_KEY: &str = "engine_storage_layout";
 /// Engine-internal storage layout version. Layout 2 introduced typed
 /// family identity in the catalog and versioned log; layout 3 added
-/// the mirror outbox row beside every versioned entry — a layout-2
-/// store opening under this build would carry versioned entries with
-/// no outbox rows, so a mirror would silently ship an incomplete
-/// history. Older stores hard-fail at open and are rebuilt through
-/// checkpoint import or versioned replay.
-const STORAGE_LAYOUT: u64 = 3;
+/// the mirror outbox row beside every versioned entry; layout 4 made
+/// `RecordKey` carry its domain-key vs identifier kind. Older stores
+/// hard-fail at open and are rebuilt through checkpoint import or
+/// versioned replay.
+const STORAGE_LAYOUT: u64 = 4;
 /// The layout of stores written before the layout slot existed.
 const LAYOUT_BEFORE_SLOT: u64 = 1;
 const COMMIT_LOG: sema::Table<u64, CommitLogEntry> = sema::Table::new("__sema_engine_commit_log");
@@ -164,7 +163,7 @@ impl Engine {
         let identifier = self.next_record_identifier(assertion.table())?;
         let commit_sequence = self.next_commit_sequence()?;
         let snapshot = self.next_snapshot()?;
-        let key = crate::RecordKey::new(identifier.value().to_string());
+        let key = crate::RecordKey::identifier(identifier);
         let entry = CommitLogEntry::single(
             commit_sequence,
             snapshot,
@@ -237,7 +236,7 @@ impl Engine {
 
         let commit_sequence = self.next_commit_sequence()?;
         let snapshot = self.next_snapshot()?;
-        let key = crate::RecordKey::new(retraction.identifier().value().to_string());
+        let key = crate::RecordKey::identifier(retraction.identifier());
         let entry = CommitLogEntry::single(
             commit_sequence,
             snapshot,
@@ -311,7 +310,7 @@ impl Engine {
 
         let commit_sequence = self.next_commit_sequence()?;
         let snapshot = self.next_snapshot()?;
-        let key = crate::RecordKey::new(mutation.identifier().value().to_string());
+        let key = crate::RecordKey::identifier(mutation.identifier());
         let entry = CommitLogEntry::single(
             commit_sequence,
             snapshot,

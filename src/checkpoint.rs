@@ -320,7 +320,7 @@ impl CheckpointSegment {
         let mut current: Vec<ViewRow> = Vec::new();
         let mut current_bytes = 0usize;
         for row in rows {
-            let row_bytes = row.payload().bytes().map_or(0, <[u8]>::len) + row.key().as_str().len();
+            let row_bytes = row.payload().bytes().map_or(0, <[u8]>::len) + row.key().encoded_len();
             if !current.is_empty() && current_bytes + row_bytes > SEGMENT_BYTE_BUDGET {
                 segments.push(Self::new(std::mem::take(&mut current)));
                 current_bytes = 0;

@@ -315,7 +315,7 @@ fn pre_family_identity_store_hard_fails_with_typed_layout_error() {
         error,
         sema_engine::Error::StorageLayoutMismatch {
             stored: 1,
-            expected: 3
+            expected: 4
         }
     ));
 }
@@ -327,7 +327,7 @@ fn pre_outbox_layout_store_hard_fails_with_typed_layout_error() {
 
     // Simulate a layout-2 store: the layout slot exists at 2, from
     // before the mirror outbox row joined every versioned entry's
-    // write transaction. Opening it under layout 3 would let a mirror
+    // write transaction. Opening it under layout 4 would let a mirror
     // silently ship an incomplete history, so it hard-fails typed.
     {
         const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
@@ -348,7 +348,39 @@ fn pre_outbox_layout_store_hard_fails_with_typed_layout_error() {
         error,
         sema_engine::Error::StorageLayoutMismatch {
             stored: 2,
-            expected: 3
+            expected: 4
+        }
+    ));
+}
+
+#[test]
+fn string_record_key_layout_store_hard_fails_with_typed_layout_error() {
+    let fixture = Fixture::new();
+    let path = fixture.database_path("layout-three");
+
+    // Simulate a layout-3 store: versioned entries have outbox rows, but
+    // persisted RecordKey values still used the old string-only archived
+    // shape. Layout 4 makes key kind part of the durable log/view identity.
+    {
+        const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
+        let schema = sema::Schema {
+            version: SchemaVersion::new(1),
+        };
+        let storage = sema::Sema::open_with_schema(&path, &schema).expect("kernel opens");
+        storage
+            .write(|transaction| COUNTERS.insert(transaction, "engine_storage_layout", &3))
+            .expect("layout-3 slot writes");
+    }
+
+    let Err(error) = Engine::open(EngineOpen::new(path, SchemaVersion::new(1))) else {
+        panic!("layout-3 store must be rejected");
+    };
+
+    assert!(matches!(
+        error,
+        sema_engine::Error::StorageLayoutMismatch {
+            stored: 3,
+            expected: 4
         }
     ));
 }
