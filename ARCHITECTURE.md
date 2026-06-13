@@ -127,9 +127,11 @@ redb calls.
   record that landed in the registered table. Versioned retract
   operations store a tombstone with the same table/key identity.
 - `versioned_commit_log` and `versioned_replay_from_sequence` expose the
-  local log for component backup/mirror code. Network transport, remote
-  acknowledgement policy, and server-side retention are not part of
-  `sema-engine`.
+  local log for component backup/mirror code. Suffix reads are storage-key
+  range reads over commit sequence, not whole-log materialization followed
+  by an in-memory filter; checkpoint, rebuild, and mirror outbox tails use
+  the same range-read shape. Network transport, remote acknowledgement
+  policy, and server-side retention are not part of `sema-engine`.
 - `Engine::replay_versioned(VersionedReplay)` folds versioned log
   entries into a registered family, dispatching each operation on
   family identity. A table renamed between log and replay (same family,

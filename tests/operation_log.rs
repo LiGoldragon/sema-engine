@@ -288,6 +288,40 @@ fn replay_from_sequence_uses_durable_commit_sequence_cursor() {
 }
 
 #[test]
+fn versioned_replay_from_sequence_uses_the_same_inclusive_cursor() {
+    let fixture = LogFixture::new();
+    let mut engine = fixture.open_versioned_engine();
+    let records = engine
+        .register_table(fixture.descriptor())
+        .expect("table registers");
+    for key in ["alpha", "beta", "gamma"] {
+        engine
+            .assert(Assertion::new(records, LoggedRecord::new(key, "body")))
+            .expect("assert succeeds");
+    }
+
+    let replay = engine
+        .versioned_replay_from_sequence(CommitSequence::new(2))
+        .expect("versioned replay reads");
+    let empty = engine
+        .versioned_replay_from_sequence(CommitSequence::new(4))
+        .expect("empty versioned replay reads");
+
+    assert_eq!(replay.len(), 2);
+    assert_eq!(replay[0].commit_sequence(), CommitSequence::new(2));
+    assert_eq!(replay[1].commit_sequence(), CommitSequence::new(3));
+    assert_eq!(
+        replay[0].operations().head().key().map(RecordKey::as_str),
+        Some("beta")
+    );
+    assert_eq!(
+        replay[1].operations().head().key().map(RecordKey::as_str),
+        Some("gamma")
+    );
+    assert!(empty.is_empty());
+}
+
+#[test]
 fn rejected_commit_does_not_advance_commit_sequence() {
     let fixture = LogFixture::new();
     let mut engine = fixture.open_engine();

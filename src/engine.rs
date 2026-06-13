@@ -1048,6 +1048,18 @@ impl Engine {
             .collect())
     }
 
+    fn commit_log_from_sequence(
+        &self,
+        start: crate::CommitSequence,
+    ) -> Result<Vec<CommitLogEntry>> {
+        Ok(self
+            .storage
+            .read(|transaction| COMMIT_LOG.range(transaction, start.value()..))?
+            .into_iter()
+            .map(|(_sequence, entry)| entry)
+            .collect())
+    }
+
     pub fn versioned_commit_log(&self) -> Result<Vec<VersionedCommitLogEntry>> {
         Ok(self
             .storage
@@ -1057,26 +1069,30 @@ impl Engine {
             .collect())
     }
 
+    fn versioned_commit_log_from_sequence(
+        &self,
+        start: crate::CommitSequence,
+    ) -> Result<Vec<VersionedCommitLogEntry>> {
+        Ok(self
+            .storage
+            .read(|transaction| VERSIONED_COMMIT_LOG.range(transaction, start.value()..))?
+            .into_iter()
+            .map(|(_sequence, entry)| entry)
+            .collect())
+    }
+
     pub fn replay_from_sequence(
         &self,
         start: crate::CommitSequence,
     ) -> Result<Vec<CommitLogEntry>> {
-        Ok(self
-            .commit_log()?
-            .into_iter()
-            .filter(|entry| entry.commit_sequence() >= start)
-            .collect())
+        self.commit_log_from_sequence(start)
     }
 
     pub fn versioned_replay_from_sequence(
         &self,
         start: crate::CommitSequence,
     ) -> Result<Vec<VersionedCommitLogEntry>> {
-        Ok(self
-            .versioned_commit_log()?
-            .into_iter()
-            .filter(|entry| entry.commit_sequence() >= start)
-            .collect())
+        self.versioned_commit_log_from_sequence(start)
     }
 
     pub fn commit_log_range(&self, range: SequenceRange) -> Result<Vec<CommitLogEntry>> {
@@ -1261,11 +1277,7 @@ impl Engine {
             .as_ref()
             .map(|metadata| metadata.covered().last())
             .unwrap_or_else(crate::CommitSequence::genesis);
-        let entries: Vec<VersionedCommitLogEntry> = self
-            .versioned_commit_log()?
-            .into_iter()
-            .filter(|entry| entry.commit_sequence() > after)
-            .collect();
+        let entries = self.versioned_commit_log_from_sequence(after.next())?;
         let (Some(first_entry), Some(last_entry)) = (entries.first(), entries.last()) else {
             return Err(Error::CheckpointNothingToCover);
         };
@@ -1385,11 +1397,7 @@ impl Engine {
             ),
             None => (Vec::new(), None, crate::CommitSequence::genesis()),
         };
-        let entries: Vec<VersionedCommitLogEntry> = self
-            .versioned_commit_log()?
-            .into_iter()
-            .filter(|entry| entry.commit_sequence() > after)
-            .collect();
+        let entries = self.versioned_commit_log_from_sequence(after.next())?;
         let view = CanonicalView::fold(&checkpoint_rows, &entries, chain_head)?;
         let view_digest = view.digest();
         let materialize = view.into_rows(&self.family_inventory())?;
@@ -1538,10 +1546,9 @@ impl Engine {
             .unwrap_or_else(crate::CommitSequence::genesis);
         Ok(self
             .storage
-            .read(|transaction| OUTBOX.iter(transaction))?
+            .read(|transaction| OUTBOX.range(transaction, after.next().value()..))?
             .into_iter()
             .map(|(_sequence, row)| row)
-            .filter(|row| row.commit_sequence() > after)
             .collect())
     }
 
