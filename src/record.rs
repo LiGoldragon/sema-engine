@@ -83,7 +83,7 @@ impl RecordKey {
 
     /// The key's canonical string form: the domain string verbatim, or
     /// the identifier's decimal representation. This is the byte
-    /// sequence the chain/view digest folds in (see [`Self::update_digest`])
+    /// sequence the chain/view digest folds in (see `Self::update_digest`)
     /// and the redb key a domain-keyed family table stores under.
     pub fn to_owned_string(&self) -> String {
         match self {

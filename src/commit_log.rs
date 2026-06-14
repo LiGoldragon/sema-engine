@@ -1,6 +1,6 @@
 //! The hash-chained versioned commit log and its metadata projection.
 //!
-//! [`CommitLog`] owns one coherent plane of engine state: the two
+//! `CommitLog` owns one coherent plane of engine state: the two
 //! durable log tables (the metadata [`CommitLogEntry`] log and the
 //! authoritative [`VersionedCommitLogEntry`] log), the persisted
 //! chain-head digest the write path mints each new entry's predecessor
@@ -9,7 +9,7 @@
 //! versioned entry only ever lands here, advancing the chain head and
 //! the versioned count in the same write transaction as the row.
 //!
-//! [`CommitLog`] is a scoped capability minted over the engine's
+//! `CommitLog` is a scoped capability minted over the engine's
 //! storage, exactly as [`crate::StorageReader`] and
 //! [`crate::RowMaterializer`] are. Its read methods open read
 //! transactions on the borrowed storage; its append methods write only
