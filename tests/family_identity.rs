@@ -315,7 +315,7 @@ fn pre_family_identity_store_hard_fails_with_typed_layout_error() {
         error,
         sema_engine::Error::StorageLayoutMismatch {
             stored: 1,
-            expected: 4
+            expected: 5
         }
     ));
 }
@@ -327,8 +327,8 @@ fn pre_outbox_layout_store_hard_fails_with_typed_layout_error() {
 
     // Simulate a layout-2 store: the layout slot exists at 2, from
     // before the mirror outbox row joined every versioned entry's
-    // write transaction. Opening it under layout 4 would let a mirror
-    // silently ship an incomplete history, so it hard-fails typed.
+    // write transaction. Opening it under a newer layout would let a
+    // mirror silently ship an incomplete history, so it hard-fails typed.
     {
         const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
         let schema = sema::Schema {
@@ -348,7 +348,7 @@ fn pre_outbox_layout_store_hard_fails_with_typed_layout_error() {
         error,
         sema_engine::Error::StorageLayoutMismatch {
             stored: 2,
-            expected: 4
+            expected: 5
         }
     ));
 }
@@ -380,7 +380,45 @@ fn string_record_key_layout_store_hard_fails_with_typed_layout_error() {
         error,
         sema_engine::Error::StorageLayoutMismatch {
             stored: 3,
-            expected: 4
+            expected: 5
+        }
+    ));
+}
+
+#[test]
+fn layout_four_store_without_versioned_log_hard_fails_with_typed_layout_error() {
+    let fixture = Fixture::new();
+    let path = fixture.database_path("layout-four");
+
+    // Simulate a layout-4 store that never opted into versioning: the
+    // layout slot sits at 4 and no versioned commit log exists, so the
+    // layout-5 derived slots (CHAIN_HEAD and the log counts) are not
+    // recoverable by a log refold. Opening it under layout 5 hard-fails
+    // typed — the missing derived state is not log-derivable, so the
+    // store must be rebuilt through checkpoint import or versioned
+    // replay. (A layout-4 store *with* a versioned log upgrades in
+    // place instead; see tests/layout_rebuild.rs.) State loss is
+    // unacceptable (Spirit 29pb).
+    {
+        const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
+        let schema = sema::Schema {
+            version: SchemaVersion::new(1),
+        };
+        let storage = sema::Sema::open_with_schema(&path, &schema).expect("kernel opens");
+        storage
+            .write(|transaction| COUNTERS.insert(transaction, "engine_storage_layout", &4))
+            .expect("layout-4 slot writes");
+    }
+
+    let Err(error) = Engine::open(EngineOpen::new(path, SchemaVersion::new(1))) else {
+        panic!("layout-4 store must be rejected");
+    };
+
+    assert!(matches!(
+        error,
+        sema_engine::Error::StorageLayoutMismatch {
+            stored: 4,
+            expected: 5
         }
     ));
 }

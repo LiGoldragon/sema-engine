@@ -149,7 +149,7 @@ fn engine_accepts_explicit_keys_for_imported_record_types() {
         .expect("explicit-key match succeeds");
 
     assert_eq!(asserted.operation(), SemaOperation::Assert);
-    assert_eq!(asserted.key().as_str(), "terminal-alpha");
+    assert_eq!(asserted.key().to_owned_string(), "terminal-alpha");
     assert_eq!(
         matched.records(),
         &[ImportedContractRecord::new("alpha", "from signal-terminal")]

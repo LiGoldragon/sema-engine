@@ -123,9 +123,9 @@ fn record_key_kind_distinguishes_domain_keys_from_engine_identifiers() {
         .key()
         .expect("identified operation carries key");
 
-    assert_eq!(domain_key.as_str(), "1");
+    assert_eq!(domain_key.to_owned_string(), "1");
     assert_eq!(domain_key.kind(), RecordKeyKind::Domain);
-    assert_eq!(identified_key.as_str(), "1");
+    assert_eq!(identified_key.to_owned_string(), "1");
     assert_eq!(identified_key.kind(), RecordKeyKind::Identifier);
     assert_eq!(
         identified_key.identifier_value(),
@@ -154,7 +154,10 @@ fn assert_writes_commit_log_entry_with_committed_snapshot() {
     let head = log[0].operations().head();
     assert_eq!(head.operation(), SemaOperation::Assert);
     assert_eq!(head.table_name(), "logged_records");
-    assert_eq!(head.key().map(RecordKey::as_str), Some("alpha"));
+    assert_eq!(
+        head.key().map(RecordKey::to_owned_string).as_deref(),
+        Some("alpha")
+    );
 }
 
 #[test]
@@ -266,7 +269,13 @@ fn versioned_commit_log_carries_payloads_and_digest_chain() {
     let first_operation = log[0].operations().head();
     assert_eq!(first_operation.operation(), SemaOperation::Assert);
     assert_eq!(first_operation.table_name(), "logged_records");
-    assert_eq!(first_operation.key().map(RecordKey::as_str), Some("alpha"));
+    assert_eq!(
+        first_operation
+            .key()
+            .map(RecordKey::to_owned_string)
+            .as_deref(),
+        Some("alpha")
+    );
     assert_eq!(
         fixture.decode_payload(first_operation.payload()),
         LoggedRecord::new("alpha", "first")
@@ -274,7 +283,13 @@ fn versioned_commit_log_carries_payloads_and_digest_chain() {
 
     let second_operation = log[1].operations().head();
     assert_eq!(second_operation.operation(), SemaOperation::Retract);
-    assert_eq!(second_operation.key().map(RecordKey::as_str), Some("alpha"));
+    assert_eq!(
+        second_operation
+            .key()
+            .map(RecordKey::to_owned_string)
+            .as_deref(),
+        Some("alpha")
+    );
     assert!(second_operation.payload().is_tombstone());
 }
 
@@ -300,11 +315,19 @@ fn versioned_commit_log_preserves_atomic_operation_bundle() {
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].operation_count(), 2);
     assert_eq!(
-        log[0].operations().head().key().map(RecordKey::as_str),
+        log[0]
+            .operations()
+            .head()
+            .key()
+            .map(RecordKey::to_owned_string)
+            .as_deref(),
         Some("alpha")
     );
     assert_eq!(
-        log[0].operations().tail()[0].key().map(RecordKey::as_str),
+        log[0].operations().tail()[0]
+            .key()
+            .map(RecordKey::to_owned_string)
+            .as_deref(),
         Some("beta")
     );
     assert_eq!(
@@ -340,7 +363,12 @@ fn replay_from_sequence_uses_durable_commit_sequence_cursor() {
     assert_eq!(replay[0].commit_sequence(), CommitSequence::new(2));
     assert_eq!(replay[0].snapshot(), SnapshotIdentifier::new(2));
     assert_eq!(
-        replay[0].operations().head().key().map(RecordKey::as_str),
+        replay[0]
+            .operations()
+            .head()
+            .key()
+            .map(RecordKey::to_owned_string)
+            .as_deref(),
         Some("beta")
     );
 }
@@ -369,11 +397,21 @@ fn versioned_replay_from_sequence_uses_the_same_inclusive_cursor() {
     assert_eq!(replay[0].commit_sequence(), CommitSequence::new(2));
     assert_eq!(replay[1].commit_sequence(), CommitSequence::new(3));
     assert_eq!(
-        replay[0].operations().head().key().map(RecordKey::as_str),
+        replay[0]
+            .operations()
+            .head()
+            .key()
+            .map(RecordKey::to_owned_string)
+            .as_deref(),
         Some("beta")
     );
     assert_eq!(
-        replay[1].operations().head().key().map(RecordKey::as_str),
+        replay[1]
+            .operations()
+            .head()
+            .key()
+            .map(RecordKey::to_owned_string)
+            .as_deref(),
         Some("gamma")
     );
     assert!(empty.is_empty());

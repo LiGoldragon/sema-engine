@@ -12,6 +12,7 @@
 
 pub mod catalog;
 pub mod checkpoint;
+pub mod commit_log;
 pub mod engine;
 pub mod error;
 pub mod fold;

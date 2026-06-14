@@ -15,10 +15,11 @@ use crate::checkpoint::{
     Checkpoint, CheckpointMetadata, CheckpointReceipt, CheckpointSegment, CheckpointSequence,
     CommitSequenceRange, FamilyInventory, IdentifiedCounter, SegmentReference,
 };
+use crate::commit_log::{CommitLog, LogCounts};
 use crate::fold::{CanonicalView, FamilyDirectory, RebuildReceipt, RowMaterializer};
 use crate::import::{ImportReceipt, ImportSession};
 use crate::log::{CommitLogEntry, CommitLogOperation};
-use crate::outbox::{Durability, MirrorAcknowledgement, MirrorHead, OutboxEntry};
+use crate::outbox::{Durability, MirrorAcknowledgement, MirrorHead, Outbox, OutboxEntry};
 use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
     Catalog, CommitRequest, DeltaKind, EngineStoredRecord, EngineStoredValue, Error,
@@ -43,15 +44,19 @@ const STORAGE_LAYOUT_KEY: &str = "engine_storage_layout";
 /// Engine-internal storage layout version. Layout 2 introduced typed
 /// family identity in the catalog and versioned log; layout 3 added
 /// the mirror outbox row beside every versioned entry; layout 4 made
-/// `RecordKey` carry its domain-key vs identifier kind. Older stores
-/// hard-fail at open and are rebuilt through checkpoint import or
-/// versioned replay.
-const STORAGE_LAYOUT: u64 = 4;
+/// `RecordKey` carry its domain-key vs identifier kind; layout 5
+/// persists the versioned chain-head digest in its own slot so the
+/// write path reads the predecessor digest in O(1) instead of scanning
+/// the whole versioned log. A layout-4 store that opted into versioning
+/// (its versioned log is non-empty) upgrades in place at open: the
+/// layout-5 derived slots — CHAIN_HEAD and the log counts — refold from
+/// the complete versioned log, verified by recomputation, since slice
+/// A's bump was additive over the data tables. A store at an older
+/// layout with no versioned log still hard-fails at open and is rebuilt
+/// through checkpoint import or versioned replay.
+const STORAGE_LAYOUT: u64 = 5;
 /// The layout of stores written before the layout slot existed.
 const LAYOUT_BEFORE_SLOT: u64 = 1;
-const COMMIT_LOG: sema::Table<u64, CommitLogEntry> = sema::Table::new("__sema_engine_commit_log");
-const VERSIONED_COMMIT_LOG: sema::Table<u64, VersionedCommitLogEntry> =
-    sema::Table::new("__sema_engine_versioned_commit_log");
 const SUBSCRIPTIONS: sema::Table<u64, SubscriptionRegistration> =
     sema::Table::new("__sema_engine_subscriptions");
 const IDENTIFIED_COUNTERS: sema::Table<String, u64> =
@@ -60,16 +65,23 @@ const CHECKPOINTS: sema::Table<u64, CheckpointMetadata> =
     sema::Table::new("__sema_engine_checkpoints");
 const CHECKPOINT_SEGMENTS: sema::Table<&'static [u8; 32], CheckpointSegment> =
     sema::Table::new("__sema_engine_checkpoint_segments");
-const OUTBOX: sema::Table<u64, OutboxEntry> = sema::Table::new("__sema_engine_outbox");
-const MIRROR_CURSOR: sema::Table<&'static str, MirrorHead> =
-    sema::Table::new("__sema_engine_mirror_cursor");
-const MIRROR_SHIPPED_KEY: &str = "shipped";
 
 pub struct Engine {
     storage: sema::Sema,
     catalog: Catalog,
     subscriptions: SubscriptionRegistry,
     versioning_policy: Option<VersioningPolicy>,
+    /// Serializes the engine's own read-compute-write path so two
+    /// `&self` callers cannot each read the same chain head, commit
+    /// sequence, or duplicate-key state and race their writes. Held
+    /// across the entire sequence-allocation → predecessor-digest read →
+    /// duplicate check → identifier mint → redb write so each mutation
+    /// commits as one serialized unit. This guards the engine's *own*
+    /// write path; it is not an `Arc<Mutex>` shared across actors, so
+    /// it does not violate the no-shared-mutex rule. `Engine` stays
+    /// `Send + Sync`, so an `Arc<Engine>` is safely shared across
+    /// threads and writers serialize through this lock.
+    write_lock: std::sync::Mutex<()>,
 }
 
 impl Engine {
@@ -77,7 +89,7 @@ impl Engine {
         let storage = sema::Sema::open_with_schema(request.path(), request.schema())?;
         // Every validation runs before the first engine write: an open
         // that rejects a store must not mutate the store it rejects.
-        let stamped_layout = Self::validated_storage_layout(&storage)?;
+        let layout_plan = Self::validated_storage_layout(&storage)?;
         let registrations = match storage.read(|transaction| CATALOG.iter(transaction)) {
             Ok(rows) => rows
                 .into_iter()
@@ -93,17 +105,19 @@ impl Engine {
             }
             Err(other) => return Err(other.into()),
         };
-        if stamped_layout.is_none() {
-            storage.write(|transaction| {
-                COUNTERS.insert(transaction, STORAGE_LAYOUT_KEY, &STORAGE_LAYOUT)
-            })?;
-        }
+        // Apply the layout plan only after every read-only validation
+        // passed: a virgin store gets its layout slot stamped; an older
+        // store that opted into versioning refolds the layout-introduced
+        // derived slots from its complete log and re-stamps. Open is
+        // single-threaded, so this is the only writer and needs no lock.
+        Self::apply_layout_plan(&storage, layout_plan)?;
         let catalog = Catalog::new(registrations);
         Ok(Self {
             storage,
             catalog,
             subscriptions: SubscriptionRegistry::new(),
             versioning_policy: request.versioning_policy().cloned(),
+            write_lock: std::sync::Mutex::new(()),
         })
     }
 
@@ -158,6 +172,7 @@ impl Engine {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
+        let _write_guard = self.write_guard();
         self.ensure_identified_registered(assertion.table())?;
 
         let identifier = self.next_record_identifier(assertion.table())?;
@@ -182,14 +197,15 @@ impl Engine {
             assertion.record(),
         )?;
         let counter_key = assertion.table().name().identified_counter_key();
+        let counts = self.log_counts()?;
         self.storage.write(|transaction| {
             assertion.table().sema_table().insert(
                 transaction,
                 identifier.value(),
                 assertion.record(),
             )?;
-            COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
-            self.insert_versioned_entry(transaction, &versioned_entry)?;
+            CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
+            Self::insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -220,6 +236,7 @@ impl Engine {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
+        let _write_guard = self.write_guard();
         self.ensure_identified_registered(retraction.table())?;
 
         let Some(_record) = self.storage.read(|transaction| {
@@ -253,14 +270,19 @@ impl Engine {
             *retraction.table().name(),
             Some(key),
         )?;
+        let counts = self.log_counts()?;
         let removed = self.storage.write(|transaction| {
             let removed = retraction
                 .table()
                 .sema_table()
                 .remove(transaction, retraction.identifier().value())?;
             if removed {
-                COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
-                self.insert_versioned_entry(transaction, &versioned_entry)?;
+                CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
+                Self::insert_versioned_entry(
+                    transaction,
+                    &versioned_entry,
+                    counts.next_versioned(),
+                )?;
                 COUNTERS.insert(
                     transaction,
                     LATEST_COMMIT_SEQUENCE_KEY,
@@ -296,6 +318,7 @@ impl Engine {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
+        let _write_guard = self.write_guard();
         self.ensure_identified_registered(mutation.table())?;
 
         let Some(_record) = self.storage.read(|transaction| {
@@ -328,14 +351,15 @@ impl Engine {
             Some(key),
             mutation.record(),
         )?;
+        let counts = self.log_counts()?;
         self.storage.write(|transaction| {
             mutation.table().sema_table().insert(
                 transaction,
                 mutation.identifier().value(),
                 mutation.record(),
             )?;
-            COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
-            self.insert_versioned_entry(transaction, &versioned_entry)?;
+            CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
+            Self::insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -383,6 +407,7 @@ impl Engine {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
+        let _write_guard = self.write_guard();
         self.ensure_registered(assertion.table())?;
 
         let key = assertion.key().clone();
@@ -419,14 +444,15 @@ impl Engine {
             Some(key.clone()),
             assertion.record(),
         )?;
+        let counts = self.log_counts()?;
         self.storage.write(|transaction| {
             assertion.table().sema_table().insert(
                 transaction,
                 key.to_owned_string(),
                 assertion.record(),
             )?;
-            COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
-            self.insert_versioned_entry(transaction, &versioned_entry)?;
+            CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
+            Self::insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -481,6 +507,7 @@ impl Engine {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
+        let _write_guard = self.write_guard();
         self.ensure_registered(mutation.table())?;
 
         let key = mutation.key().clone();
@@ -517,14 +544,15 @@ impl Engine {
             Some(key.clone()),
             mutation.record(),
         )?;
+        let counts = self.log_counts()?;
         self.storage.write(|transaction| {
             mutation.table().sema_table().insert(
                 transaction,
                 key.to_owned_string(),
                 mutation.record(),
             )?;
-            COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
-            self.insert_versioned_entry(transaction, &versioned_entry)?;
+            CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
+            Self::insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -561,6 +589,7 @@ impl Engine {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
+        let _write_guard = self.write_guard();
         self.ensure_registered(retraction.table())?;
 
         let Some(record) = self.storage.read(|transaction| {
@@ -592,14 +621,19 @@ impl Engine {
             *retraction.table().name(),
             Some(key.clone()),
         )?;
+        let counts = self.log_counts()?;
         let removed = self.storage.write(|transaction| {
             let removed = retraction
                 .table()
                 .sema_table()
                 .remove(transaction, key.to_owned_string())?;
             if removed {
-                COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
-                self.insert_versioned_entry(transaction, &versioned_entry)?;
+                CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
+                Self::insert_versioned_entry(
+                    transaction,
+                    &versioned_entry,
+                    counts.next_versioned(),
+                )?;
                 COUNTERS.insert(
                     transaction,
                     LATEST_COMMIT_SEQUENCE_KEY,
@@ -643,6 +677,7 @@ impl Engine {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
+        let _write_guard = self.write_guard();
         self.ensure_registered(request.table())?;
         if request.operations().is_empty() {
             return Err(Error::EmptyCommit {
@@ -780,6 +815,7 @@ impl Engine {
         } else {
             None
         };
+        let counts = self.log_counts()?;
         self.storage.write(|transaction| {
             for operation in request.operations() {
                 match operation {
@@ -798,8 +834,8 @@ impl Engine {
                     }
                 }
             }
-            COMMIT_LOG.insert(transaction, commit_sequence.value(), &entry)?;
-            self.insert_versioned_entry(transaction, &versioned_entry)?;
+            CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
+            Self::insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -1038,46 +1074,37 @@ impl Engine {
         })?)
     }
 
+    /// The persisted versioned chain-head digest — the entry digest of
+    /// the most recent versioned commit log entry, read O(1) from its
+    /// own slot. `None` when no versioned entry has been written yet.
+    /// This is the cached optimization the write path uses to mint the
+    /// next entry's predecessor digest; it is never an integrity
+    /// source. A `fold` over the whole log recomputes the same digest
+    /// from the entry's fields, which is what verifies the chain.
+    pub fn versioned_chain_head(&self) -> Result<Option<crate::EntryDigest>> {
+        self.latest_versioned_entry_digest()
+    }
+
     pub fn commit_log(&self) -> Result<Vec<CommitLogEntry>> {
-        Ok(self
-            .storage
-            .read(|transaction| COMMIT_LOG.iter(transaction))?
-            .into_iter()
-            .map(|(_sequence, entry)| entry)
-            .collect())
+        self.log_plane().entries()
     }
 
     fn commit_log_from_sequence(
         &self,
         start: crate::CommitSequence,
     ) -> Result<Vec<CommitLogEntry>> {
-        Ok(self
-            .storage
-            .read(|transaction| COMMIT_LOG.range(transaction, start.value()..))?
-            .into_iter()
-            .map(|(_sequence, entry)| entry)
-            .collect())
+        self.log_plane().entries_from(start)
     }
 
     pub fn versioned_commit_log(&self) -> Result<Vec<VersionedCommitLogEntry>> {
-        Ok(self
-            .storage
-            .read(|transaction| VERSIONED_COMMIT_LOG.iter(transaction))?
-            .into_iter()
-            .map(|(_sequence, entry)| entry)
-            .collect())
+        self.log_plane().versioned_entries()
     }
 
     fn versioned_commit_log_from_sequence(
         &self,
         start: crate::CommitSequence,
     ) -> Result<Vec<VersionedCommitLogEntry>> {
-        Ok(self
-            .storage
-            .read(|transaction| VERSIONED_COMMIT_LOG.range(transaction, start.value()..))?
-            .into_iter()
-            .map(|(_sequence, entry)| entry)
-            .collect())
+        self.log_plane().versioned_entries_from(start)
     }
 
     pub fn replay_from_sequence(
@@ -1095,11 +1122,7 @@ impl Engine {
     }
 
     pub fn commit_log_range(&self, range: SequenceRange) -> Result<Vec<CommitLogEntry>> {
-        Ok(self
-            .commit_log()?
-            .into_iter()
-            .filter(|entry| range.contains(entry.snapshot()))
-            .collect())
+        self.log_plane().entries_in(range)
     }
 
     pub fn subscribe<RecordValue>(
@@ -1155,6 +1178,24 @@ impl Engine {
     /// is the architectural witness.
     pub fn storage_reader(&self) -> StorageReader<'_> {
         StorageReader::new(&self.storage)
+    }
+
+    /// Mint the hash-chained log plane over the engine's storage: the
+    /// scoped capability that owns the commit-log tables, the cached
+    /// chain head, the row counts, and the single append choke point.
+    /// Like [`StorageReader`], it borrows the storage for its reads; its
+    /// append methods write only their own rows into a write transaction
+    /// the engine opens and lends in.
+    fn log_plane(&self) -> CommitLog<'_> {
+        CommitLog::new(&self.storage)
+    }
+
+    /// Mint the mirror-outbox plane over the engine's storage: the
+    /// scoped capability that owns the outbox rows, the shipped cursor,
+    /// and the durability classification, with a `record` choke point
+    /// that writes only the outbox row into a lent write transaction.
+    fn outbox_plane(&self) -> Outbox<'_> {
+        Outbox::new(&self.storage)
     }
 
     /// The derived store-level schema identity over the current family
@@ -1262,6 +1303,7 @@ impl Engine {
     /// log already contains everything the checkpoint folds; logging
     /// the fold would make history describe itself.
     pub fn checkpoint(&self) -> Result<CheckpointReceipt> {
+        let _write_guard = self.write_guard();
         let policy = self
             .versioning_policy
             .as_ref()
@@ -1383,6 +1425,7 @@ impl Engine {
     /// transaction; it does not route through assert/mutate, so the
     /// rebuild logs nothing and the log remains the single history.
     pub fn rebuild_from_log(&self, directory: &dyn FamilyDirectory) -> Result<RebuildReceipt> {
+        let _write_guard = self.write_guard();
         if self.versioning_policy.is_none() {
             return Err(Error::versioning_not_enabled("rebuild_from_log"));
         }
@@ -1499,13 +1542,14 @@ impl Engine {
                 LATEST_CHECKPOINT_KEY,
                 &metadata.sequence().value(),
             )?;
-            for entry in &suffix {
-                Self::insert_versioned_row(transaction, entry)?;
-                COMMIT_LOG.insert(
-                    transaction,
-                    entry.commit_sequence().value(),
-                    &CommitLogEntry::from(entry),
-                )?;
+            // The store is fresh (verified above), so both counts start
+            // at zero and advance one per restored entry; after the loop
+            // each equals the suffix length and the two stay equal.
+            for (index, entry) in suffix.iter().enumerate() {
+                let count = index as u64 + 1;
+                CommitLog::append_versioned(transaction, entry, count)?;
+                Outbox::record(transaction, entry)?;
+                CommitLog::append_commit(transaction, &CommitLogEntry::from(entry), count)?;
             }
             COUNTERS.insert(
                 transaction,
@@ -1539,83 +1583,38 @@ impl Engine {
     /// matching versioned entries through
     /// [`Self::versioned_replay_from_sequence`] and ships those.
     pub fn unshipped_outbox(&self) -> Result<Vec<OutboxEntry>> {
-        let after = self
-            .mirror_head()?
-            .map(|head| head.commit_sequence())
-            .unwrap_or_else(crate::CommitSequence::genesis);
-        Ok(self
-            .storage
-            .read(|transaction| OUTBOX.range(transaction, after.next().value()..))?
-            .into_iter()
-            .map(|(_sequence, row)| row)
-            .collect())
+        self.outbox_plane().unshipped()
     }
 
     /// The durable shipped cursor: the last server-confirmed mirror
     /// head, if any acknowledgement has landed.
     pub fn mirror_head(&self) -> Result<Option<MirrorHead>> {
-        Ok(self
-            .storage
-            .read(|transaction| MIRROR_CURSOR.get(transaction, MIRROR_SHIPPED_KEY))?)
+        self.outbox_plane().mirror_head()
     }
 
     /// Record a server-confirmed mirror head, advancing the durable
     /// shipped cursor. Idempotent: a head at or behind the cursor is
     /// a typed no-op. A head naming a sequence with no outbox row is
     /// [`Error::MirrorHeadUnknown`]; a head whose digest disagrees
-    /// with the recorded outbox row is [`Error::MirrorHeadForked`].
+    /// with the recorded outbox row is [`Error::MirrorHeadForked`]. The
+    /// engine reads the logged versioned entry's digest through the log
+    /// plane and hands it to the outbox plane, which cross-checks it
+    /// against the recorded outbox row before advancing the cursor.
     pub fn acknowledge_mirror(&self, head: MirrorHead) -> Result<MirrorAcknowledgement> {
-        let sequence = head.commit_sequence();
-        let (recorded, logged) = self.storage.read(|transaction| {
-            Ok((
-                OUTBOX.get(transaction, sequence.value())?,
-                VERSIONED_COMMIT_LOG.get(transaction, sequence.value())?,
-            ))
-        })?;
-        let recorded = recorded.ok_or(Error::MirrorHeadUnknown {
-            sequence: sequence.value(),
-        })?;
-        if logged.is_none_or(|entry| entry.entry_digest() != recorded.entry_digest()) {
-            return Err(Error::OutboxEntryMismatch {
-                sequence: sequence.value(),
-            });
-        }
-        if recorded.entry_digest() != head.entry_digest() {
-            return Err(Error::MirrorHeadForked {
-                sequence: sequence.value(),
-                recorded: recorded.entry_digest(),
-                acknowledged: head.entry_digest(),
-            });
-        }
-        if let Some(current) = self.mirror_head()? {
-            if sequence <= current.commit_sequence() {
-                return Ok(MirrorAcknowledgement::Unchanged(current));
-            }
-        }
-        self.storage
-            .write(|transaction| MIRROR_CURSOR.insert(transaction, MIRROR_SHIPPED_KEY, &head))?;
-        Ok(MirrorAcknowledgement::Advanced(head))
+        let _write_guard = self.write_guard();
+        let logged_digest = self
+            .log_plane()
+            .versioned_entry_at(head.commit_sequence())?
+            .map(|entry| entry.entry_digest());
+        self.outbox_plane().acknowledge(head, logged_digest)
     }
 
     /// The durability level of one committed write.
     pub fn durability_of(&self, sequence: crate::CommitSequence) -> Result<Durability> {
-        let (commit, outbox_row) = self.storage.read(|transaction| {
-            Ok((
-                COMMIT_LOG.get(transaction, sequence.value())?,
-                OUTBOX.get(transaction, sequence.value())?,
-            ))
-        })?;
-        if commit.is_none() {
-            return Err(Error::unknown_commit_sequence(sequence));
-        }
-        let Some(outbox_row) = outbox_row else {
-            return Ok(Durability::LocalCommitted);
-        };
-        match self.mirror_head()? {
-            Some(head) if outbox_row.commit_sequence() <= head.commit_sequence() => {
-                Ok(Durability::ServerCommitted)
-            }
-            _ => Ok(Durability::QueuedForMirror),
+        if self.log_plane().entry_present(sequence)? {
+            self.outbox_plane().durability_of(sequence)
+        } else {
+            Err(Error::unknown_commit_sequence(sequence))
         }
     }
 
@@ -1627,11 +1626,7 @@ impl Engine {
         if self.versioning_policy.is_none() {
             return Ok(Durability::LocalCommitted);
         }
-        if self.unshipped_outbox()?.is_empty() {
-            Ok(Durability::ServerCommitted)
-        } else {
-            Ok(Durability::QueuedForMirror)
-        }
+        self.outbox_plane().store_durability()
     }
 
     /// Every registered family identity, in catalog order.
@@ -1662,14 +1657,12 @@ impl Engine {
     /// the whole state; a store that wrote history before enabling
     /// versioning cannot checkpoint or rebuild.
     fn ensure_versioned_log_complete(&self) -> Result<()> {
-        let (commits, versioned) = self.storage.read(|transaction| {
-            Ok((
-                COMMIT_LOG.iter(transaction)?.len() as u64,
-                VERSIONED_COMMIT_LOG.iter(transaction)?.len() as u64,
-            ))
-        })?;
-        if commits != versioned {
-            return Err(Error::VersionedLogIncomplete { commits, versioned });
+        let counts = self.log_counts()?;
+        if counts.commits() != counts.versioned() {
+            return Err(Error::VersionedLogIncomplete {
+                commits: counts.commits(),
+                versioned: counts.versioned(),
+            });
         }
         Ok(())
     }
@@ -1682,10 +1675,9 @@ impl Engine {
                     .is_none()
                     && COUNTERS.get(transaction, LATEST_SNAPSHOT_KEY)?.is_none()
                     && COUNTERS.get(transaction, LATEST_CHECKPOINT_KEY)?.is_none()
-                    && CATALOG.iter(transaction)?.is_empty()
-                    && COMMIT_LOG.iter(transaction)?.is_empty()
-                    && VERSIONED_COMMIT_LOG.iter(transaction)?.is_empty())
-            })?;
+                    && CATALOG.iter(transaction)?.is_empty())
+            })?
+            && self.log_plane().logs_empty()?;
         if fresh {
             Ok(())
         } else {
@@ -1693,17 +1685,45 @@ impl Engine {
         }
     }
 
-    /// Read and validate the layout slot without writing. Returns the
-    /// stamped layout, or `None` for a virgin store whose slot the
-    /// caller stamps after every other open-time validation passes.
-    fn validated_storage_layout(storage: &sema::Sema) -> Result<Option<u64>> {
+    /// Read and validate the layout slot without writing, returning the
+    /// open-time plan the caller applies after every other validation
+    /// passes. A current-layout store is left alone; a virgin store is
+    /// stamped fresh; an older store that already opted into versioning
+    /// refolds the layout-introduced derived slots from its complete
+    /// log; everything else hard-fails with a typed layout error.
+    fn validated_storage_layout(storage: &sema::Sema) -> Result<LayoutOpenPlan> {
         let stored = storage.read(|transaction| COUNTERS.get(transaction, STORAGE_LAYOUT_KEY))?;
         match stored {
-            Some(layout) if layout == STORAGE_LAYOUT => Ok(Some(layout)),
-            Some(layout) => Err(Error::StorageLayoutMismatch {
+            // Current layout: idempotent open, nothing to do.
+            Some(layout) if layout == STORAGE_LAYOUT => Ok(LayoutOpenPlan::Current),
+            // Forward skew: a layout newer than this build wrote derived
+            // state this engine cannot interpret. Refusing to downgrade
+            // an unknown-newer store is the only safe move.
+            Some(layout) if layout > STORAGE_LAYOUT => Err(Error::StorageLayoutMismatch {
                 stored: layout,
                 expected: STORAGE_LAYOUT,
             }),
+            // Older layout. Slice A's bump to layout 5 was purely
+            // additive — it added the CHAIN_HEAD and log-count derived
+            // slots without touching the data tables or the versioned
+            // log format. So if the store opted into versioning and its
+            // versioned log is non-empty, the missing derived slots are
+            // recomputable from that log alone: refold them and
+            // re-stamp. With no versioned log present this is a
+            // pre-versioning store whose derived state is not log-
+            // recoverable, so it hard-fails (the previous-engine
+            // StoreMigration owns pre-v9 stores); state loss is
+            // unacceptable (Spirit 29pb).
+            Some(layout) => {
+                if CommitLog::versioned_log_present(storage)? {
+                    Ok(LayoutOpenPlan::RebuildDerivedSlots)
+                } else {
+                    Err(Error::StorageLayoutMismatch {
+                        stored: layout,
+                        expected: STORAGE_LAYOUT,
+                    })
+                }
+            }
             None => {
                 // No layout slot: either a virgin store or a layout-1
                 // store from before the slot existed. Any engine counter
@@ -1721,7 +1741,27 @@ impl Engine {
                         expected: STORAGE_LAYOUT,
                     });
                 }
-                Ok(None)
+                Ok(LayoutOpenPlan::StampFresh)
+            }
+        }
+    }
+
+    /// Carry out the open-time layout plan. Runs only after every
+    /// read-only validation passed, so an open that rejects a store
+    /// never mutates the store it rejects.
+    fn apply_layout_plan(storage: &sema::Sema, plan: LayoutOpenPlan) -> Result<()> {
+        match plan {
+            LayoutOpenPlan::Current => Ok(()),
+            LayoutOpenPlan::StampFresh => Ok(storage.write(|transaction| {
+                COUNTERS.insert(transaction, STORAGE_LAYOUT_KEY, &STORAGE_LAYOUT)
+            })?),
+            // Refold the layout-introduced derived slots (the persisted
+            // chain-head digest and the two log-count counters) from the
+            // store's complete versioned log and re-stamp the layout
+            // counter. The log plane owns those slots, so the refold lives
+            // there; the engine names the layout slot and target version.
+            LayoutOpenPlan::RebuildDerivedSlots => {
+                CommitLog::rebuild_derived_slots(storage, STORAGE_LAYOUT_KEY, STORAGE_LAYOUT)
             }
         }
     }
@@ -1761,6 +1801,22 @@ impl Engine {
             .ok_or_else(|| Error::TableNotRegistered {
                 table: name.as_str().to_owned(),
             })
+    }
+
+    /// Acquire the engine's write-serialization lock for the duration
+    /// of a single mutation. Every mutator holds the returned guard
+    /// across its whole read-compute-write, so sequence allocation,
+    /// the predecessor-digest read, the duplicate-key check, identifier
+    /// minting, and the redb write execute as one serialized unit and
+    /// two concurrent `&self` callers can never fork the digest chain
+    /// or duplicate a commit sequence. The lock poisons only if a
+    /// writer panics mid-mutation — an unrecoverable state in which the
+    /// redb transaction has already rolled back — so propagating the
+    /// poison through `expect` is correct.
+    fn write_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write_lock
+            .lock()
+            .expect("engine write lock poisoned by a panicking writer")
     }
 
     fn next_snapshot(&self) -> Result<SnapshotIdentifier> {
@@ -1994,40 +2050,40 @@ impl Engine {
         Ok(VersionedPayload::record(bytes.as_slice().to_vec()))
     }
 
+    /// The predecessor digest a freshly-minted versioned entry names —
+    /// the digest of the current chain head, read O(1) from the log
+    /// plane's persisted slot. This is an optimization only: integrity
+    /// never derives from this slot; [`CanonicalView::fold`] recomputes
+    /// every entry digest and verifies the chain link by link.
     fn latest_versioned_entry_digest(&self) -> Result<Option<crate::EntryDigest>> {
-        Ok(self
-            .storage
-            .read(|transaction| VERSIONED_COMMIT_LOG.iter(transaction))?
-            .into_iter()
-            .map(|(_sequence, entry)| entry.entry_digest())
-            .next_back())
+        self.log_plane().chain_head()
     }
 
+    /// The persisted row counts for both logs, read O(1) through the log
+    /// plane. A mutator reads these under the held write lock alongside
+    /// the next commit sequence, then writes the incremented counts
+    /// inside the same transaction as the rows — keeping the counts
+    /// exact without ever materializing either log.
+    fn log_counts(&self) -> Result<LogCounts> {
+        self.log_plane().counts()
+    }
+
+    /// The single durable choke point for one versioned commit: the log
+    /// plane lands the versioned entry (advancing its chain head and
+    /// count) and the outbox plane records the mirror row beside it, both
+    /// inside the one write transaction the engine opened — so data,
+    /// log, outbox, and counters commit as one atomic unit. A versioning-
+    /// disabled store carries no versioned entry, so this is a no-op.
     fn insert_versioned_entry(
-        &self,
         transaction: &sema::WriteTransaction,
         entry: &Option<VersionedCommitLogEntry>,
+        versioned_count: u64,
     ) -> sema::Result<()> {
         if let Some(entry) = entry {
-            Self::insert_versioned_row(transaction, entry)?;
+            CommitLog::append_versioned(transaction, entry, versioned_count)?;
+            Outbox::record(transaction, entry)?;
         }
         Ok(())
-    }
-
-    /// The single durable choke point for versioned history: every
-    /// versioned commit log entry lands with its mirror outbox row in
-    /// the same write transaction, whether written by a live mutation
-    /// or restored verbatim by an import.
-    fn insert_versioned_row(
-        transaction: &sema::WriteTransaction,
-        entry: &VersionedCommitLogEntry,
-    ) -> sema::Result<()> {
-        VERSIONED_COMMIT_LOG.insert(transaction, entry.commit_sequence().value(), entry)?;
-        OUTBOX.insert(
-            transaction,
-            entry.commit_sequence().value(),
-            &OutboxEntry::from(entry),
-        )
     }
 }
 
@@ -2037,6 +2093,19 @@ impl Engine {
 enum FamilyRegistration {
     Existing,
     New(TableRegistration),
+}
+
+/// The open-time storage-layout plan: what an open must do to the store
+/// after every read-only validation has passed. Decided before any
+/// write so a rejected open never mutates the store it rejects.
+enum LayoutOpenPlan {
+    /// The store is already at the current layout — idempotent open.
+    Current,
+    /// A virgin store with no engine history: stamp the layout slot.
+    StampFresh,
+    /// An older versioned store: refold the layout-introduced derived
+    /// slots from its complete log and re-stamp to the current layout.
+    RebuildDerivedSlots,
 }
 
 /// Read-only handle over the engine's storage kernel for transitional
