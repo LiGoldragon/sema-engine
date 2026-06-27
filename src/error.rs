@@ -179,6 +179,9 @@ pub enum Error {
     #[error("subscription registry lock poisoned")]
     SubscriptionRegistryPoisoned,
 
+    #[error("subscription failure log lock poisoned")]
+    SubscriptionFailureLogPoisoned,
+
     #[error("subscription sink failed before registration: {message}")]
     SubscriptionSink { message: String },
 

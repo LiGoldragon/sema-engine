@@ -467,7 +467,7 @@ impl Engine {
             &key,
             snapshot,
             &record,
-        )?;
+        );
 
         Ok(crate::MutationReceipt::new(
             SemaOperation::Assert,
@@ -567,7 +567,7 @@ impl Engine {
             &key,
             snapshot,
             &record,
-        )?;
+        );
 
         Ok(crate::MutationReceipt::new(
             SemaOperation::Mutate,
@@ -652,7 +652,7 @@ impl Engine {
             &key,
             snapshot,
             &record,
-        )?;
+        );
 
         Ok(crate::MutationReceipt::new(
             SemaOperation::Retract,
@@ -852,7 +852,7 @@ impl Engine {
                 effect.key(),
                 snapshot,
                 effect.record(),
-            )?;
+            );
         }
 
         Ok(crate::CommitReceipt::new(
@@ -1145,9 +1145,17 @@ impl Engine {
                 message: error.message().to_owned(),
             })?;
         self.persist_subscription(handle, plan.filter().clone())?;
-        self.subscriptions
-            .add(ActiveSubscription::new(handle, plan, sink))?;
+        self.subscriptions.add(ActiveSubscription::new(
+            handle,
+            plan,
+            sink,
+            self.subscriptions.failure_recorder(),
+        ))?;
         Ok(SubscriptionReceipt::new(handle, initial))
+    }
+
+    pub fn subscription_fanout_failures(&self) -> Result<Vec<crate::SubscriptionFanoutFailure>> {
+        self.subscriptions.fanout_failures()
     }
 
     pub fn subscription_registrations(&self) -> Result<Vec<SubscriptionRegistration>> {

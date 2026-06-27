@@ -8,7 +8,7 @@ use sema_engine::{
     Assertion, CommitRequest, CommitSequence, DeltaKind, Engine, EngineOpen, EngineRecord,
     FamilyName, Mutation, QueryPlan, RecordKey, Retraction, SchemaHash, SchemaVersion,
     SequenceRange, SinkError, SnapshotIdentifier, SubscriptionDeliveryMode, SubscriptionEvent,
-    SubscriptionSink, TableDescriptor, TableName,
+    SubscriptionFanoutFailure, SubscriptionSink, TableDescriptor, TableName,
 };
 use tempfile::TempDir;
 
@@ -115,6 +115,10 @@ impl DeltaFailingSink {
 }
 
 impl SubscriptionSink<SubscribedRecord> for DeltaFailingSink {
+    fn delivery_mode(&self) -> SubscriptionDeliveryMode {
+        SubscriptionDeliveryMode::Inline
+    }
+
     fn deliver(&self, event: SubscriptionEvent<SubscribedRecord>) -> Result<(), SinkError> {
         match event {
             SubscriptionEvent::InitialSnapshot(_) => {
@@ -393,7 +397,7 @@ fn subscribe_sink_failure_does_not_roll_back_commit() {
         .expect("table registers");
     let (failed_sender, failed_receiver) = mpsc::channel();
     let sink = Arc::new(DeltaFailingSink::new(failed_sender));
-    engine
+    let subscription = engine
         .subscribe(QueryPlan::all(records), sink)
         .expect("subscription succeeds");
 
@@ -411,6 +415,19 @@ fn subscribe_sink_failure_does_not_roll_back_commit() {
     failed_receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("failing sink receives delta");
+    let failures = engine
+        .subscription_fanout_failures()
+        .expect("fanout failures are readable");
+    assert_eq!(failures.len(), 1);
+    assert!(
+        matches!(
+            &failures[0],
+            SubscriptionFanoutFailure::Sink(failure)
+                if failure.handle() == subscription.handle()
+                    && failure.message() == "queue full"
+        ),
+        "fanout failure is recorded separately from the write receipt"
+    );
     assert_eq!(
         matched.records(),
         &[SubscribedRecord::new("alpha", "committed")]

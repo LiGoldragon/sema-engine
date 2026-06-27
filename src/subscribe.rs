@@ -265,6 +265,32 @@ impl SubscriptionDeliveryFailure {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscriptionFanoutFailure {
+    Sink(SubscriptionDeliveryFailure),
+    RegistryUnavailable,
+}
+
+impl SubscriptionFanoutFailure {
+    fn sink(handle: SubscriptionHandle, error: SinkError) -> Self {
+        Self::Sink(SubscriptionDeliveryFailure::new(handle, error))
+    }
+
+    pub fn handle(&self) -> Option<SubscriptionHandle> {
+        match self {
+            Self::Sink(failure) => Some(failure.handle()),
+            Self::RegistryUnavailable => None,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Sink(failure) => failure.message(),
+            Self::RegistryUnavailable => "subscription registry lock poisoned",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriptionDeliveryMode {
     Detached,
@@ -304,13 +330,23 @@ impl SequenceRange {
 
 pub(crate) struct SubscriptionRegistry {
     entries: Mutex<Vec<Arc<dyn ErasedSubscription>>>,
+    failures: SubscriptionFailureRecorder,
 }
 
 impl SubscriptionRegistry {
     pub(crate) fn new() -> Self {
         Self {
             entries: Mutex::new(Vec::new()),
+            failures: SubscriptionFailureRecorder::new(),
         }
+    }
+
+    pub(crate) fn failure_recorder(&self) -> SubscriptionFailureRecorder {
+        self.failures.clone()
+    }
+
+    pub(crate) fn fanout_failures(&self) -> crate::Result<Vec<SubscriptionFanoutFailure>> {
+        self.failures.failures()
     }
 
     pub(crate) fn add<RecordValue>(
@@ -334,20 +370,45 @@ impl SubscriptionRegistry {
         key: &RecordKey,
         snapshot: SnapshotIdentifier,
         record: &RecordValue,
-    ) -> crate::Result<()>
-    where
+    ) where
         RecordValue: Clone + Send + Sync + 'static,
     {
-        let entries = self
-            .entries
-            .lock()
-            .map_err(|_| crate::Error::SubscriptionRegistryPoisoned)?
-            .clone();
+        let Ok(entries) = self.entries.lock() else {
+            self.failures
+                .record(SubscriptionFanoutFailure::RegistryUnavailable);
+            return;
+        };
+        let entries = entries.clone();
         let record = record as &dyn Any;
         for entry in entries {
             entry.deliver_delta(kind, table, key, snapshot, record);
         }
-        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SubscriptionFailureRecorder {
+    failures: Arc<Mutex<Vec<SubscriptionFanoutFailure>>>,
+}
+
+impl SubscriptionFailureRecorder {
+    fn new() -> Self {
+        Self {
+            failures: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn record(&self, failure: SubscriptionFanoutFailure) {
+        if let Ok(mut failures) = self.failures.lock() {
+            failures.push(failure);
+        }
+    }
+
+    fn failures(&self) -> crate::Result<Vec<SubscriptionFanoutFailure>> {
+        self.failures
+            .lock()
+            .map(|failures| failures.clone())
+            .map_err(|_| crate::Error::SubscriptionFailureLogPoisoned)
     }
 }
 
@@ -355,6 +416,7 @@ pub(crate) struct ActiveSubscription<RecordValue> {
     handle: SubscriptionHandle,
     plan: QueryPlan<RecordValue>,
     sink: Arc<dyn SubscriptionSink<RecordValue>>,
+    failures: SubscriptionFailureRecorder,
 }
 
 impl<RecordValue> ActiveSubscription<RecordValue> {
@@ -362,8 +424,14 @@ impl<RecordValue> ActiveSubscription<RecordValue> {
         handle: SubscriptionHandle,
         plan: QueryPlan<RecordValue>,
         sink: Arc<dyn SubscriptionSink<RecordValue>>,
+        failures: SubscriptionFailureRecorder,
     ) -> Self {
-        Self { handle, plan, sink }
+        Self {
+            handle,
+            plan,
+            sink,
+            failures,
+        }
     }
 
     fn matches(&self, key: &RecordKey) -> bool {
@@ -414,12 +482,19 @@ where
         match self.sink.delivery_mode() {
             SubscriptionDeliveryMode::Detached => {
                 let sink = Arc::clone(&self.sink);
+                let failures = self.failures.clone();
+                let handle = self.handle;
                 drop(std::thread::spawn(move || {
-                    let _ = sink.deliver(event);
+                    if let Err(error) = sink.deliver(event) {
+                        failures.record(SubscriptionFanoutFailure::sink(handle, error));
+                    }
                 }));
             }
             SubscriptionDeliveryMode::Inline => {
-                let _ = self.sink.deliver(event);
+                if let Err(error) = self.sink.deliver(event) {
+                    self.failures
+                        .record(SubscriptionFanoutFailure::sink(self.handle, error));
+                }
             }
         }
     }

@@ -62,8 +62,9 @@ pub use sequence::CommitSequence;
 pub use snapshot::{DatabaseMarker, SnapshotIdentifier};
 pub use subscribe::{
     DeltaKind, InitialSnapshot, SequenceRange, SinkError, SubscriptionDeliveryFailure,
-    SubscriptionDeliveryMode, SubscriptionDelta, SubscriptionEvent, SubscriptionHandle,
-    SubscriptionIdentifier, SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink,
+    SubscriptionDeliveryMode, SubscriptionDelta, SubscriptionEvent, SubscriptionFanoutFailure,
+    SubscriptionHandle, SubscriptionIdentifier, SubscriptionReceipt, SubscriptionRegistration,
+    SubscriptionSink,
 };
 pub use table::{
     IdentifiedRecord, IdentifiedTableDescriptor, IdentifiedTableReference, TableDescriptor,
