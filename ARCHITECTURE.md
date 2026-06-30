@@ -38,10 +38,35 @@ sections that follow realize it.
   write transaction at every choke point. Per Spirit 29pb / j487; per
   Spirit 29pb: atomic server-backed durability, state loss unacceptable.
 - The engine surface follows the architecture of its users rather than
-  forcing components to build compatibility shims. The crate stays
-  library-only and component-agnostic: no daemon binary, socket
-  listener, actor runtime, NOTA parser, or component-specific signal
-  contract dependency.
+  forcing components to build compatibility shims. When a schema-derived
+  component exposes a reusable storage need, the answer is to improve
+  this shared engine surface, not to port the component onto a
+  mismatched API. The crate stays library-only and component-agnostic:
+  no daemon binary, socket listener, actor runtime, NOTA parser, or
+  component-specific signal contract dependency.
+- Durable backing comes first. For the lojix cutover and any new
+  consumer, build the durable database backing (live-generation set,
+  GC roots, event log persisted with self-resume) before any
+  in-memory shortcut, so the on-disk log is authoritative from the
+  start rather than retrofitted. Per Spirit fosp.
+- The schema component holds the compiled binary runtime schema (O(1)
+  lookup, version-diff and namespace tables); NOTA is the source
+  authoring format, not the runtime shape. Per Spirit fosp.
+- Every path that introduces entries to a versioned branch routes
+  through one reusable `IntakePolicy` admission interface, with
+  per-component implementations. `IntakePolicy` is not only a rebase
+  hook: assert, mutate, retract, replay, import, and any future
+  entry-introducing path admit through it unless a later design
+  explicitly supersedes this. Per Spirit 2uhh. (`IntakePolicy` is the
+  admission half of the versioning library; `VersioningPolicy` names
+  the store and schema identity. The admission interface is accepted
+  direction; the concrete trait is not yet built.)
+- Splitting SEMA out of the daemon into its own process is a
+  distant-future consideration that applies only if a component's
+  database must become much larger and independently available. It is
+  not the current design — the engine is a per-plane library linked
+  into each component daemon — and it should not be emphasized in a way
+  that suggests an imminent split. Per Spirit en7k.
 
 ## Constraints
 
@@ -149,6 +174,16 @@ sections that follow realize it.
   `Atomic` is not an operation; multi-operation atomicity is structural.
 - Schema/catalog operations are catalog data under the six operations, not a
   separate `Structure` operation.
+- The Sema classification vocabulary stays internal to engine execution
+  and observation, off the public contract wire. The six words (`Assert`,
+  `Mutate`, `Retract`, `Match`, `Subscribe`, `Validate`) are how the
+  engine classifies an operation internally; a component's public
+  contract roots are domain verbs, and the daemon derives the Sema class
+  from the dispatched request. These words must not appear as
+  request-root tags, as an `AuthorizedSignalVerb` enum, or as a
+  payloadless `SemaObservation` event in any signal or meta-signal
+  contract. Legacy contracts that still carry the classification on the
+  wire need a cleanup pass. Per Spirit 7l7l.
 - Unsupported read-plan operators return typed `UnsupportedReadPlan` errors
   instead of pretending execution succeeded.
 - `Assert`, `Mutate`, and `Retract` write one `CommitLogOperation` entry
@@ -222,7 +257,10 @@ sections that follow realize it.
 - For a multi-operation commit, `Subscribe` emits one per-operation delta after
   the commit succeeds; every delta shares the commit `SnapshotIdentifier`.
 - Sink delivery is downstream of the commit and cannot roll back the
-  mutation.
+  mutation. A durable write reply reports the persistence outcome: once
+  the commit succeeds the caller sees a committed write, and any
+  post-commit subscription fanout failure is observed separately rather
+  than turning a committed write into a rejected one. Per Spirit y3ag.
 - Subscription sinks choose detached or inline delivery. Detached is the
   default for blocking sinks; inline exists for actor enqueue sinks that need
   deterministic post-commit ordering without polling.
@@ -250,6 +288,21 @@ flowchart TD
 `sema-engine` deliberately knows nothing about Persona routing,
 terminal delivery, auth sockets, or human text. Those are component
 responsibilities.
+
+## Sema short header — symmetric with the wire side
+
+Short headers are universal across both surfaces: the wire (signal)
+and the engine (sema). Just as the signal side carries an 8-enum
+64-bit short header per message, every sema-engine operation —
+executor dispatch, read-plan lowering, command dispatch, and database
+reads/writes — carries the same 8-enum 64-bit short-header structure,
+with a sema-specific root and sub-enum vocabulary rather than the
+signal verbs. The two headers (signal-header and sema-header) use the
+same macro machinery but route to different paths. Tap-anywhere
+observability therefore extends to sema-side operations identically to
+the signal side: a tap can read the header at any engine operation
+without decoding the payload. Per Spirit duis. (Accepted direction;
+the sema-header type is not yet emitted.)
 
 ## Current Surface
 
