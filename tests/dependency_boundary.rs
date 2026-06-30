@@ -49,10 +49,12 @@ fn sema_engine_ships_no_daemon_binary() {
 }
 
 #[test]
-fn sema_engine_carries_repo_local_intent_context() {
+fn sema_engine_carries_repo_local_direction_context() {
     let fixture = RepositoryFixture::current();
 
-    assert!(fixture.has_file("INTENT.md"));
+    // Durable direction lives in ARCHITECTURE.md; there is no per-repo
+    // INTENT.md.
+    assert!(!fixture.has_file("INTENT.md"));
     assert!(fixture.has_file("ARCHITECTURE.md"));
     assert!(fixture.has_file("AGENTS.md"));
     assert!(fixture.has_file("skills.md"));

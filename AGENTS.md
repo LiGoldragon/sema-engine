@@ -10,12 +10,11 @@ Sema database-operation execution.
 ## Required Local Reading
 
 1. `ARCHITECTURE.md`
-2. `INTENT.md`
-3. `skills.md`
-4. `/home/li/primary/skills/rust-discipline.md`
-5. `/home/li/primary/skills/rust/storage-and-wire.md`
-6. `/home/li/primary/skills/nix-discipline.md`
-7. `/home/li/primary/skills/jj.md`
+2. `skills.md`
+3. `/home/li/primary/skills/rust-discipline.md`
+4. `/home/li/primary/skills/rust/storage-and-wire.md`
+5. `/home/li/primary/skills/nix-discipline.md`
+6. `/home/li/primary/skills/jj.md`
 
 ## Local Rules
 

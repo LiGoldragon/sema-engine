@@ -27,7 +27,6 @@
         repoContextFile = path: _type: builtins.elem (baseNameOf path) [
           "AGENTS.md"
           "ARCHITECTURE.md"
-          "INTENT.md"
           "skills.md"
         ];
         src = pkgs.lib.cleanSourceWith {

@@ -11,6 +11,38 @@ families. Component daemons own actors, sockets, authorization, domain
 validation, and their own databases through `Engine`, not through raw
 redb calls.
 
+## Direction
+
+The durable direction below is psyche-stated; the constraints and
+sections that follow realize it.
+
+- `sema-engine` is the exclusive database-operation boundary for
+  state-bearing components: no component daemon makes direct redb calls,
+  defines redb tables, runs redb transactions, or maintains its own
+  database commit ledger. Per Spirit fosp (Correction): Sema-engine is
+  the exclusive interface to the database; no component daemon may make
+  direct redb calls.
+- The versioned operation log is the authoritative source of truth for
+  component Sema state, and the redb store is a rebuildable materialized
+  view folded from the log. Per Spirit iir4 (Decision). Durable writes
+  go through logged choke points; components receive a read-only
+  `StorageReader` with no write affordance, so the log stays complete by
+  construction.
+- blake3 is the content-addressing primitive throughout: family schema
+  hashes, the derived store-level schema hash, segment addresses, and
+  the versioned-entry digest chain. Per Spirit x0ja (Constraint).
+- Native version control is one reusable library and state loss is
+  unacceptable. Components configure a `VersioningPolicy` once rather
+  than reimplementing component-local durability journals, and every
+  versioned entry lands with a durable mirror outbox row in the same
+  write transaction at every choke point. Per Spirit 29pb / j487; per
+  Spirit 29pb: atomic server-backed durability, state loss unacceptable.
+- The engine surface follows the architecture of its users rather than
+  forcing components to build compatibility shims. The crate stays
+  library-only and component-agnostic: no daemon binary, socket
+  listener, actor runtime, NOTA parser, or component-specific signal
+  contract dependency.
+
 ## Constraints
 
 - `sema-engine` is a Rust library crate.
