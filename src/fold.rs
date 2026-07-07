@@ -346,6 +346,17 @@ impl RebuildReceipt {
 /// [`RowMaterializer::apply_identified`].
 pub trait FamilyDirectory {
     fn materialize(&self, row: RowMaterializer<'_>) -> Result<()>;
+
+    /// Deliver one staged operation's subscription delta after a
+    /// staged-group materialization commits, by dispatching the typed
+    /// decode exactly as [`Self::materialize`] does. The default
+    /// delivers nothing — rebuild and import materializations carry no
+    /// live subscribers — so only components that route live writes
+    /// through the staging seam implement it.
+    fn announce(&self, delta: crate::staging::DeltaAnnouncer<'_>) -> Result<()> {
+        let _ = delta;
+        Ok(())
+    }
 }
 
 /// One-shot affordance to land one view row in its materialized

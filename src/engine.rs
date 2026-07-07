@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rkyv::api::high::HighDeserializer;
@@ -16,10 +16,14 @@ use crate::checkpoint::{
     CommitSequenceRange, FamilyInventory, IdentifiedCounter, SegmentReference,
 };
 use crate::commit_log::{CommitLog, LogCounts};
-use crate::fold::{CanonicalView, FamilyDirectory, RebuildReceipt, RowMaterializer};
+use crate::fold::{CanonicalView, FamilyDirectory, RebuildReceipt, RowMaterializer, ViewRow};
 use crate::import::{ImportReceipt, ImportSession};
 use crate::log::{CommitLogEntry, CommitLogOperation};
 use crate::outbox::{Durability, MirrorAcknowledgement, MirrorHead, Outbox, OutboxEntry};
+use crate::staging::{
+    DeltaAnnouncer, DiscardStagedReceipt, MaterializeStagedReceipt, OverlayEffect, OverlayPresence,
+    StageReceipt, StagedGroupSummary, Staging, StagingBase, StagingSession,
+};
 use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
     Catalog, CommitRequest, DeltaKind, EngineStoredRecord, EngineStoredValue, Error,
@@ -82,6 +86,15 @@ pub struct Engine {
     /// `Send + Sync`, so an `Arc<Engine>` is safely shared across
     /// threads and writers serialize through this lock.
     write_lock: std::sync::Mutex<()>,
+    /// The engaged staging session, if a staged operation group is
+    /// being built. Engagement is an engine-wide mode: while `Some`,
+    /// every write method buffers into the session instead of
+    /// committing, and the session-scoped read surface overlays the
+    /// buffered operations onto committed state. The engine's owner
+    /// serializes head-advancing intake, so at most one build runs at
+    /// a time; the durable staging slot backs this session across a
+    /// park, and the session itself is memory only.
+    staging: std::sync::Mutex<Option<StagingSession>>,
 }
 
 impl Engine {
@@ -118,6 +131,7 @@ impl Engine {
             subscriptions: SubscriptionRegistry::new(),
             versioning_policy: request.versioning_policy().cloned(),
             write_lock: std::sync::Mutex::new(()),
+            staging: std::sync::Mutex::new(None),
         })
     }
 
@@ -174,6 +188,11 @@ impl Engine {
     {
         let _write_guard = self.write_guard();
         self.ensure_identified_registered(assertion.table())?;
+        let mut staging = self.staging_guard();
+        if let Some(session) = staging.as_mut() {
+            return self.staged_assert_identified(session, assertion);
+        }
+        drop(staging);
 
         let identifier = self.next_record_identifier(assertion.table())?;
         let commit_sequence = self.next_commit_sequence()?;
@@ -238,6 +257,11 @@ impl Engine {
     {
         let _write_guard = self.write_guard();
         self.ensure_identified_registered(retraction.table())?;
+        let mut staging = self.staging_guard();
+        if let Some(session) = staging.as_mut() {
+            return self.staged_retract_identified(session, retraction);
+        }
+        drop(staging);
 
         let Some(_record) = self.storage.read(|transaction| {
             retraction
@@ -320,6 +344,11 @@ impl Engine {
     {
         let _write_guard = self.write_guard();
         self.ensure_identified_registered(mutation.table())?;
+        let mut staging = self.staging_guard();
+        if let Some(session) = staging.as_mut() {
+            return self.staged_mutate_identified(session, mutation);
+        }
+        drop(staging);
 
         let Some(_record) = self.storage.read(|transaction| {
             mutation
@@ -409,6 +438,11 @@ impl Engine {
     {
         let _write_guard = self.write_guard();
         self.ensure_registered(assertion.table())?;
+        let mut staging = self.staging_guard();
+        if let Some(session) = staging.as_mut() {
+            return self.staged_assert_keyed(session, assertion);
+        }
+        drop(staging);
 
         let key = assertion.key().clone();
         if self
@@ -509,6 +543,11 @@ impl Engine {
     {
         let _write_guard = self.write_guard();
         self.ensure_registered(mutation.table())?;
+        let mut staging = self.staging_guard();
+        if let Some(session) = staging.as_mut() {
+            return self.staged_mutate_keyed(session, mutation);
+        }
+        drop(staging);
 
         let key = mutation.key().clone();
         if self
@@ -591,6 +630,11 @@ impl Engine {
     {
         let _write_guard = self.write_guard();
         self.ensure_registered(retraction.table())?;
+        let mut staging = self.staging_guard();
+        if let Some(session) = staging.as_mut() {
+            return self.staged_retract(session, retraction);
+        }
+        drop(staging);
 
         let Some(record) = self.storage.read(|transaction| {
             retraction
@@ -684,6 +728,11 @@ impl Engine {
                 table: request.table().name().as_str().to_owned(),
             });
         }
+        let mut staging = self.staging_guard();
+        if let Some(session) = staging.as_mut() {
+            return self.staged_commit(session, request);
+        }
+        drop(staging);
 
         let mut effect_keys = HashSet::new();
         let mut effects = Vec::new();
@@ -875,6 +924,11 @@ impl Engine {
             >,
     {
         self.ensure_registered(query.table())?;
+        let staging = self.staging_guard();
+        if let Some(session) = staging.as_ref() {
+            return self.staged_match_records(session, query);
+        }
+        drop(staging);
 
         let (database_marker, records) = match query.read_plan().node() {
             crate::ReadPlanNode::AllRows => self.storage.read(|transaction| {
@@ -954,6 +1008,11 @@ impl Engine {
             >,
     {
         self.ensure_identified_registered(query.table())?;
+        let staging = self.staging_guard();
+        if let Some(session) = staging.as_ref() {
+            return self.staged_match_identified(session, query);
+        }
+        drop(staging);
 
         let (database_marker, records) = match query.read_plan().node() {
             crate::IdentifiedReadPlanNode::AllRows => self.storage.read(|transaction| {
@@ -1045,7 +1104,43 @@ impl Engine {
         ))
     }
 
+    /// The latest snapshot. While a staging session is engaged this
+    /// reflects the buffered entries — the snapshot the store would
+    /// stand at after materialization — so read-dependent build logic
+    /// observes the same values a direct write sequence would have
+    /// left.
     pub fn latest_snapshot(&self) -> Result<SnapshotIdentifier> {
+        if let Some(session) = self.staging_guard().as_ref() {
+            return Ok(session.engaged_snapshot());
+        }
+        self.committed_snapshot()
+    }
+
+    /// The current commit sequence, overlaid with the engaged staging
+    /// session's buffered entries exactly as [`Self::latest_snapshot`].
+    pub fn current_commit_sequence(&self) -> Result<crate::CommitSequence> {
+        if let Some(session) = self.staging_guard().as_ref() {
+            return Ok(session.engaged_commit_sequence());
+        }
+        self.committed_commit_sequence()
+    }
+
+    pub fn current_database_marker(&self) -> Result<crate::DatabaseMarker> {
+        if let Some(session) = self.staging_guard().as_ref() {
+            return Ok(crate::DatabaseMarker::new(
+                session.engaged_commit_sequence(),
+                session.engaged_snapshot(),
+            ));
+        }
+        Ok(self.storage.read(|transaction| {
+            Ok(Self::database_marker_from_values(
+                COUNTERS.get(transaction, LATEST_COMMIT_SEQUENCE_KEY)?,
+                COUNTERS.get(transaction, LATEST_SNAPSHOT_KEY)?,
+            ))
+        })?)
+    }
+
+    fn committed_snapshot(&self) -> Result<SnapshotIdentifier> {
         let value = self.storage.read(|transaction| {
             Ok(COUNTERS
                 .get(transaction, LATEST_SNAPSHOT_KEY)?
@@ -1055,7 +1150,7 @@ impl Engine {
         Ok(value)
     }
 
-    pub fn current_commit_sequence(&self) -> Result<crate::CommitSequence> {
+    fn committed_commit_sequence(&self) -> Result<crate::CommitSequence> {
         let value = self.storage.read(|transaction| {
             Ok(COUNTERS
                 .get(transaction, LATEST_COMMIT_SEQUENCE_KEY)?
@@ -1063,15 +1158,6 @@ impl Engine {
                 .unwrap_or_else(crate::CommitSequence::genesis))
         })?;
         Ok(value)
-    }
-
-    pub fn current_database_marker(&self) -> Result<crate::DatabaseMarker> {
-        Ok(self.storage.read(|transaction| {
-            Ok(Self::database_marker_from_values(
-                COUNTERS.get(transaction, LATEST_COMMIT_SEQUENCE_KEY)?,
-                COUNTERS.get(transaction, LATEST_SNAPSHOT_KEY)?,
-            ))
-        })?)
     }
 
     /// The persisted versioned chain-head digest — the entry digest of
@@ -1637,6 +1723,930 @@ impl Engine {
         self.outbox_plane().store_durability()
     }
 
+    /// Engage a staging session: from here until a park or abandon,
+    /// every write method buffers into one un-committed operation
+    /// group instead of committing, and the session-scoped read
+    /// surface overlays the buffered operations onto committed state.
+    /// Requires a versioned store. Refused while another session is
+    /// engaged or while the durable staging slot is occupied — an
+    /// unresolved parked group must be materialized or discarded
+    /// before a new build begins, so recovery is never silently
+    /// overwritten.
+    pub fn begin_staged_group(&self) -> Result<()> {
+        let _write_guard = self.write_guard();
+        let policy = self
+            .versioning_policy
+            .as_ref()
+            .ok_or_else(|| Error::versioning_not_enabled("staging"))?;
+        let mut staging = self.staging_guard();
+        if staging.is_some() {
+            return Err(Error::StagingSessionEngaged);
+        }
+        if self.staging_plane().slot()?.is_some() {
+            return Err(Error::StagingSlotOccupied);
+        }
+        *staging = Some(StagingSession::new(
+            StagingBase::new(
+                self.log_plane().chain_head()?,
+                self.committed_commit_sequence()?,
+                self.committed_snapshot()?,
+            ),
+            policy.store_name().clone(),
+            self.store_schema_hash(),
+        ));
+        Ok(())
+    }
+
+    /// Park the engaged session's buffered group durably and return
+    /// the prospective head digest an external grant must bind. The
+    /// session disengages either way: an empty buffer parks nothing
+    /// and returns `None` so the caller skips its authorization round;
+    /// a moved allocation base (a commit landed since engagement)
+    /// refuses the stale group fail-closed. Nothing else is touched —
+    /// no data row, no log entry, no outbox row, no counter.
+    pub fn park_staged_group(&self) -> Result<Option<StageReceipt>> {
+        let _write_guard = self.write_guard();
+        let mut staging = self.staging_guard();
+        let Some(session) = staging.take() else {
+            return Err(Error::StagingSessionNotEngaged {
+                surface: "park_staged_group",
+            });
+        };
+        if session.entry_count() == 0 {
+            return Ok(None);
+        }
+        self.ensure_staging_base_current(session.base())?;
+        if self.staging_plane().slot()?.is_some() {
+            return Err(Error::StagingSlotOccupied);
+        }
+        let group = session.into_group();
+        let receipt = StageReceipt::new(
+            group
+                .prospective_head()
+                .expect("a non-empty staged group has a prospective head"),
+            group.entry_count(),
+            group
+                .first_commit_sequence()
+                .expect("a non-empty staged group has a first sequence"),
+            group
+                .last_commit_sequence()
+                .expect("a non-empty staged group has a last sequence"),
+        );
+        self.staging_plane().park(&group)?;
+        Ok(Some(receipt))
+    }
+
+    /// Abandon the engaged session: drop the in-memory buffer and
+    /// disengage, durably touching nothing. For mid-build pipeline
+    /// failures; idempotent, so cleanup paths can always call it.
+    pub fn abandon_staged_group(&self) -> Result<()> {
+        let _write_guard = self.write_guard();
+        self.staging_guard().take();
+        Ok(())
+    }
+
+    /// The durably parked staged group, if the slot is occupied —
+    /// surfaced at open so a daemon's crash-recovery pass resolves it
+    /// (re-ask the authorizer, then materialize or discard) before the
+    /// intake path opens. Never auto-resolved by the engine.
+    pub fn staged_group(&self) -> Result<Option<StagedGroupSummary>> {
+        let Some(group) = self.staging_plane().slot()? else {
+            return Ok(None);
+        };
+        let (Some(head), Some(first), Some(last)) = (
+            group.prospective_head(),
+            group.first_commit_sequence(),
+            group.last_commit_sequence(),
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some(StagedGroupSummary::new(
+            head,
+            group.base_predecessor(),
+            group.entry_count(),
+            first,
+            last,
+        )))
+    }
+
+    /// Materialize the parked staged group: one atomic transaction
+    /// applies the parked payloads to the family tables (through the
+    /// component's directory, exactly as rebuild does), appends the
+    /// metadata and versioned log entries, records the outbox rows,
+    /// advances every counter the equivalent direct writes would have
+    /// advanced, and clears the staging slot. The parked entries apply
+    /// verbatim — nothing re-executes — and the produced head must
+    /// equal the staged prospective digest, verified by recomputing
+    /// every entry digest from its own fields against the current
+    /// chain head. Subscription deltas for the group deliver after the
+    /// transaction commits through [`FamilyDirectory::announce`],
+    /// matching what the equivalent direct writes would have
+    /// delivered; an announce error therefore reports a delivery
+    /// fault, never a rolled-back append.
+    pub fn materialize_staged_group(
+        &self,
+        directory: &dyn FamilyDirectory,
+    ) -> Result<MaterializeStagedReceipt> {
+        let _write_guard = self.write_guard();
+        if self.staging_guard().is_some() {
+            return Err(Error::StagingSessionEngaged);
+        }
+        let Some(group) = self.staging_plane().slot()? else {
+            return Err(Error::StagingSlotEmpty {
+                surface: "materialize_staged_group",
+            });
+        };
+        let current_head = self.log_plane().chain_head()?;
+        let current_sequence = self.committed_commit_sequence()?;
+        let current_snapshot = self.committed_snapshot()?;
+        if group.base_predecessor() != current_head {
+            return Err(Error::StagingBaseMoved {
+                sequence: current_sequence.value(),
+            });
+        }
+        let mut previous = current_head;
+        let mut expected_sequence = current_sequence;
+        let mut expected_snapshot = current_snapshot;
+        for entry in group.entries() {
+            expected_sequence = expected_sequence.next();
+            expected_snapshot = expected_snapshot.next();
+            if entry.previous_entry_digest() != previous
+                || entry.commit_sequence() != expected_sequence
+                || entry.snapshot() != expected_snapshot
+            {
+                return Err(Error::StagingBaseMoved {
+                    sequence: current_sequence.value(),
+                });
+            }
+            let recomputed = crate::EntryDigest::from_entry_fields(
+                entry.store_name(),
+                entry.schema_hash(),
+                entry.commit_sequence(),
+                entry.snapshot(),
+                entry.previous_entry_digest(),
+                entry.operations(),
+            );
+            if recomputed != entry.entry_digest() {
+                return Err(Error::StagedGroupDigestMismatch {
+                    sequence: entry.commit_sequence().value(),
+                    staged: entry.entry_digest(),
+                    computed: recomputed,
+                });
+            }
+            previous = Some(entry.entry_digest());
+        }
+        let staged_head = group.prospective_head().ok_or(Error::StagingSlotEmpty {
+            surface: "materialize_staged_group",
+        })?;
+        let produced = previous.expect("a verified non-empty group has a head");
+        if produced != staged_head {
+            return Err(Error::StagedHeadMismatch {
+                staged: staged_head,
+                produced,
+            });
+        }
+        let last_entry = group
+            .entries()
+            .last()
+            .expect("a verified non-empty group has a last entry");
+        let final_sequence = last_entry.commit_sequence();
+        let final_snapshot = last_entry.snapshot();
+        let mut identified_advances: HashMap<String, u64> = HashMap::new();
+        for entry in group.entries() {
+            for operation in entry.operations() {
+                if operation.operation() == SemaOperation::Assert
+                    && let Some(crate::RecordKey::Identifier(identifier)) = operation.key()
+                {
+                    identified_advances.insert(
+                        operation.family().identified_counter_key(),
+                        identifier.next().value(),
+                    );
+                }
+            }
+        }
+        let counts = self.log_counts()?;
+        self.storage.write(|transaction| {
+            let mut commit_count = counts.commits();
+            let mut versioned_count = counts.versioned();
+            for entry in group.entries() {
+                for operation in entry.operations() {
+                    let key = operation.key().cloned().ok_or_else(|| {
+                        Error::ReplayMissingKey {
+                            family: operation.family().family().as_str().to_owned(),
+                        }
+                        .into_storage()
+                    })?;
+                    directory
+                        .materialize(RowMaterializer::new(
+                            transaction,
+                            ViewRow::new(
+                                operation.family().clone(),
+                                key,
+                                operation.payload().clone(),
+                            ),
+                        ))
+                        .map_err(Error::into_storage)?;
+                }
+                commit_count += 1;
+                versioned_count += 1;
+                CommitLog::append_commit(transaction, &CommitLogEntry::from(entry), commit_count)?;
+                CommitLog::append_versioned(transaction, entry, versioned_count)?;
+                Outbox::record(transaction, entry)?;
+            }
+            COUNTERS.insert(
+                transaction,
+                LATEST_COMMIT_SEQUENCE_KEY,
+                &final_sequence.value(),
+            )?;
+            COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &final_snapshot.value())?;
+            for (counter_key, next_value) in &identified_advances {
+                IDENTIFIED_COUNTERS.insert(transaction, counter_key.clone(), next_value)?;
+            }
+            Staging::clear_in(transaction)?;
+            Ok(())
+        })?;
+        for (entry_index, entry) in group.entries().iter().enumerate() {
+            for (operation_index, operation) in entry.operations().into_iter().enumerate() {
+                let Some(key) = operation.key().cloned() else {
+                    continue;
+                };
+                let (kind, bytes) = match (operation.operation(), operation.payload()) {
+                    (SemaOperation::Assert, VersionedPayload::Record { bytes }) => {
+                        (DeltaKind::Assert, bytes.clone())
+                    }
+                    (SemaOperation::Mutate, VersionedPayload::Record { bytes }) => {
+                        (DeltaKind::Mutate, bytes.clone())
+                    }
+                    (SemaOperation::Retract, _) => {
+                        let Some(pre_image) = group.retract_pre_image(entry_index, operation_index)
+                        else {
+                            continue;
+                        };
+                        (DeltaKind::Retract, pre_image.to_vec())
+                    }
+                    _ => continue,
+                };
+                directory.announce(DeltaAnnouncer::new(
+                    &self.subscriptions,
+                    kind,
+                    operation.family().clone(),
+                    key,
+                    entry.snapshot(),
+                    bytes,
+                ))?;
+            }
+        }
+        Ok(MaterializeStagedReceipt::new(
+            staged_head,
+            final_sequence,
+            final_snapshot,
+            group.entry_count(),
+        ))
+    }
+
+    /// Discard the parked staged group: clear the slot durably,
+    /// nothing else. The refused operations never reach any observable
+    /// state, so there is nothing to roll back.
+    pub fn discard_staged_group(&self) -> Result<DiscardStagedReceipt> {
+        let _write_guard = self.write_guard();
+        let Some(group) = self.staging_plane().slot()? else {
+            return Err(Error::StagingSlotEmpty {
+                surface: "discard_staged_group",
+            });
+        };
+        let receipt = DiscardStagedReceipt::new(
+            group.prospective_head().ok_or(Error::StagingSlotEmpty {
+                surface: "discard_staged_group",
+            })?,
+            group.entry_count(),
+        );
+        self.staging_plane().clear()?;
+        Ok(receipt)
+    }
+
+    fn staging_plane(&self) -> Staging<'_> {
+        Staging::new(&self.storage)
+    }
+
+    /// Acquire the staging-session slot. Poison propagation mirrors
+    /// [`Self::write_guard`]: a panic while the session lock is held
+    /// leaves build state unrecoverable, so unwrapping is correct.
+    fn staging_guard(&self) -> std::sync::MutexGuard<'_, Option<StagingSession>> {
+        self.staging
+            .lock()
+            .expect("engine staging session lock poisoned by a panicking writer")
+    }
+
+    /// Whether the allocation base a session captured is still the
+    /// store's current state: same chain head, same counters, same
+    /// identified-counter starts. Any drift means a commit interleaved
+    /// with the build, so the staged group's sequences, digests, or
+    /// minted identifiers are stale — refuse, fail-closed.
+    fn ensure_staging_base_current(&self, base: &StagingBase) -> Result<()> {
+        let current_sequence = self.committed_commit_sequence()?;
+        if self.log_plane().chain_head()? != base.chain_head()
+            || current_sequence != base.commit_sequence()
+            || self.committed_snapshot()? != base.snapshot()
+        {
+            return Err(Error::StagingBaseMoved {
+                sequence: current_sequence.value(),
+            });
+        }
+        for (counter_key, captured_start) in base.identified_counters() {
+            let durable = self
+                .storage
+                .read(|transaction| IDENTIFIED_COUNTERS.get(transaction, counter_key.clone()))?
+                .unwrap_or_else(|| RecordIdentifier::first().value());
+            if durable != *captured_start {
+                return Err(Error::StagingBaseMoved {
+                    sequence: current_sequence.value(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn staged_assert_keyed<RecordValue>(
+        &self,
+        session: &mut StagingSession,
+        assertion: KeyedAssertion<RecordValue>,
+    ) -> Result<crate::MutationReceipt>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let key = assertion.key().clone();
+        let table_name = assertion.table().name().as_str();
+        if self.staged_key_present(session, table_name, &key, || {
+            self.record_present(assertion.table(), &key)
+        })? {
+            return Err(self.duplicate_assert_key(assertion.table(), &key));
+        }
+        let family = self.registered_family(assertion.table().name())?;
+        let payload =
+            self.versioned_record_payload(*assertion.table().name(), assertion.record())?;
+        session.set_overlay(table_name, &key, OverlayPresence::Present);
+        let (commit_sequence, snapshot) = session.append_entry(NonEmpty::single(
+            VersionedLogOperation::new(SemaOperation::Assert, family, Some(key.clone()), payload),
+        ));
+        Ok(crate::MutationReceipt::new(
+            SemaOperation::Assert,
+            *assertion.table().name(),
+            key,
+            commit_sequence,
+            snapshot,
+        ))
+    }
+
+    fn staged_mutate_keyed<RecordValue>(
+        &self,
+        session: &mut StagingSession,
+        mutation: KeyedMutation<RecordValue>,
+    ) -> Result<crate::MutationReceipt>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let key = mutation.key().clone();
+        let table_name = mutation.table().name().as_str();
+        if !self.staged_key_present(session, table_name, &key, || {
+            self.record_present(mutation.table(), &key)
+        })? {
+            return Err(self.record_not_found(mutation.table(), &key));
+        }
+        let family = self.registered_family(mutation.table().name())?;
+        let payload = self.versioned_record_payload(*mutation.table().name(), mutation.record())?;
+        session.set_overlay(table_name, &key, OverlayPresence::Present);
+        let (commit_sequence, snapshot) = session.append_entry(NonEmpty::single(
+            VersionedLogOperation::new(SemaOperation::Mutate, family, Some(key.clone()), payload),
+        ));
+        Ok(crate::MutationReceipt::new(
+            SemaOperation::Mutate,
+            *mutation.table().name(),
+            key,
+            commit_sequence,
+            snapshot,
+        ))
+    }
+
+    fn staged_retract<RecordValue>(
+        &self,
+        session: &mut StagingSession,
+        retraction: Retraction<RecordValue>,
+    ) -> Result<crate::MutationReceipt>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let key = retraction.key().clone();
+        let table_name = retraction.table().name().as_str();
+        let pre_image = self.staged_pre_image(session, table_name, &key, || {
+            Ok(self
+                .storage
+                .read(|transaction| {
+                    retraction
+                        .table()
+                        .sema_table()
+                        .get(transaction, key.to_owned_string())
+                })?
+                .map(|record: RecordValue| {
+                    self.versioned_record_payload(*retraction.table().name(), &record)
+                })
+                .transpose()?)
+        })?;
+        let Some(pre_image) = pre_image else {
+            return Err(self.record_not_found(retraction.table(), &key));
+        };
+        let family = self.registered_family(retraction.table().name())?;
+        session.set_overlay(table_name, &key, OverlayPresence::Absent);
+        session.park_pre_image(0, pre_image);
+        let (commit_sequence, snapshot) =
+            session.append_entry(NonEmpty::single(VersionedLogOperation::new(
+                SemaOperation::Retract,
+                family,
+                Some(key.clone()),
+                VersionedPayload::tombstone(),
+            )));
+        Ok(crate::MutationReceipt::new(
+            SemaOperation::Retract,
+            *retraction.table().name(),
+            key,
+            commit_sequence,
+            snapshot,
+        ))
+    }
+
+    fn staged_assert_identified<RecordValue>(
+        &self,
+        session: &mut StagingSession,
+        assertion: IdentifiedAssertion<RecordValue>,
+    ) -> Result<IdentifiedMutationReceipt>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let counter_key = assertion.table().name().identified_counter_key();
+        let identifier = session.mint_identifier(counter_key, || {
+            self.next_record_identifier(assertion.table())
+        })?;
+        let key = crate::RecordKey::identifier(identifier);
+        let family = self.registered_family(assertion.table().name())?;
+        let payload =
+            self.versioned_record_payload(*assertion.table().name(), assertion.record())?;
+        session.set_overlay(
+            assertion.table().name().as_str(),
+            &key,
+            OverlayPresence::Present,
+        );
+        let (commit_sequence, snapshot) = session.append_entry(NonEmpty::single(
+            VersionedLogOperation::new(SemaOperation::Assert, family, Some(key), payload),
+        ));
+        Ok(IdentifiedMutationReceipt::new(
+            SemaOperation::Assert,
+            *assertion.table().name(),
+            identifier,
+            commit_sequence,
+            snapshot,
+        ))
+    }
+
+    fn staged_mutate_identified<RecordValue>(
+        &self,
+        session: &mut StagingSession,
+        mutation: IdentifiedMutation<RecordValue>,
+    ) -> Result<IdentifiedMutationReceipt>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let key = crate::RecordKey::identifier(mutation.identifier());
+        let table_name = mutation.table().name().as_str();
+        if !self.staged_key_present(session, table_name, &key, || {
+            self.identified_record_present(mutation.table(), mutation.identifier())
+        })? {
+            return Err(self.identified_record_not_found(mutation.table(), mutation.identifier()));
+        }
+        let family = self.registered_family(mutation.table().name())?;
+        let payload = self.versioned_record_payload(*mutation.table().name(), mutation.record())?;
+        session.set_overlay(table_name, &key, OverlayPresence::Present);
+        let (commit_sequence, snapshot) = session.append_entry(NonEmpty::single(
+            VersionedLogOperation::new(SemaOperation::Mutate, family, Some(key), payload),
+        ));
+        Ok(IdentifiedMutationReceipt::new(
+            SemaOperation::Mutate,
+            *mutation.table().name(),
+            mutation.identifier(),
+            commit_sequence,
+            snapshot,
+        ))
+    }
+
+    fn staged_retract_identified<RecordValue>(
+        &self,
+        session: &mut StagingSession,
+        retraction: IdentifiedRetraction<RecordValue>,
+    ) -> Result<IdentifiedMutationReceipt>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let key = crate::RecordKey::identifier(retraction.identifier());
+        let table_name = retraction.table().name().as_str();
+        let pre_image = self.staged_pre_image(session, table_name, &key, || {
+            Ok(self
+                .storage
+                .read(|transaction| {
+                    retraction
+                        .table()
+                        .sema_table()
+                        .get(transaction, retraction.identifier().value())
+                })?
+                .map(|record: RecordValue| {
+                    self.versioned_record_payload(*retraction.table().name(), &record)
+                })
+                .transpose()?)
+        })?;
+        let Some(pre_image) = pre_image else {
+            return Err(
+                self.identified_record_not_found(retraction.table(), retraction.identifier())
+            );
+        };
+        let family = self.registered_family(retraction.table().name())?;
+        session.set_overlay(table_name, &key, OverlayPresence::Absent);
+        session.park_pre_image(0, pre_image);
+        let (commit_sequence, snapshot) =
+            session.append_entry(NonEmpty::single(VersionedLogOperation::new(
+                SemaOperation::Retract,
+                family,
+                Some(key),
+                VersionedPayload::tombstone(),
+            )));
+        Ok(IdentifiedMutationReceipt::new(
+            SemaOperation::Retract,
+            *retraction.table().name(),
+            retraction.identifier(),
+            commit_sequence,
+            snapshot,
+        ))
+    }
+
+    fn staged_commit<RecordValue>(
+        &self,
+        session: &mut StagingSession,
+        request: CommitRequest<RecordValue>,
+    ) -> Result<crate::CommitReceipt>
+    where
+        RecordValue: EngineStoredRecord + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let family = self.registered_family(request.table().name())?;
+        let table_name = request.table().name().as_str();
+        let mut request_keys = HashSet::new();
+        let mut operations = Vec::with_capacity(request.operation_count());
+        let mut overlay_effects = Vec::with_capacity(request.operation_count());
+        let mut pre_images = Vec::new();
+        for (operation_index, operation) in request.operations().iter().enumerate() {
+            match operation {
+                WriteOperation::Assert(record) => {
+                    let key = record.record_key();
+                    if !request_keys.insert(key.clone()) {
+                        return Err(self.duplicate_write_key(request.table(), &key));
+                    }
+                    if self.staged_key_present(session, table_name, &key, || {
+                        self.record_present(request.table(), &key)
+                    })? {
+                        return Err(self.duplicate_assert_key(request.table(), &key));
+                    }
+                    operations.push(VersionedLogOperation::new(
+                        SemaOperation::Assert,
+                        family.clone(),
+                        Some(key.clone()),
+                        self.versioned_record_payload(*request.table().name(), record)?,
+                    ));
+                    overlay_effects.push((key, OverlayPresence::Present));
+                }
+                WriteOperation::Mutate(record) => {
+                    let key = record.record_key();
+                    if !request_keys.insert(key.clone()) {
+                        return Err(self.duplicate_write_key(request.table(), &key));
+                    }
+                    if !self.staged_key_present(session, table_name, &key, || {
+                        self.record_present(request.table(), &key)
+                    })? {
+                        return Err(self.record_not_found(request.table(), &key));
+                    }
+                    operations.push(VersionedLogOperation::new(
+                        SemaOperation::Mutate,
+                        family.clone(),
+                        Some(key.clone()),
+                        self.versioned_record_payload(*request.table().name(), record)?,
+                    ));
+                    overlay_effects.push((key, OverlayPresence::Present));
+                }
+                WriteOperation::Retract(key) => {
+                    if !request_keys.insert(key.clone()) {
+                        return Err(self.duplicate_write_key(request.table(), key));
+                    }
+                    let pre_image = self.staged_pre_image(session, table_name, key, || {
+                        Ok(self
+                            .storage
+                            .read(|transaction| {
+                                request
+                                    .table()
+                                    .sema_table()
+                                    .get(transaction, key.to_owned_string())
+                            })?
+                            .map(|record: RecordValue| {
+                                self.versioned_record_payload(*request.table().name(), &record)
+                            })
+                            .transpose()?)
+                    })?;
+                    let Some(pre_image) = pre_image else {
+                        return Err(self.record_not_found(request.table(), key));
+                    };
+                    operations.push(VersionedLogOperation::new(
+                        SemaOperation::Retract,
+                        family.clone(),
+                        Some(key.clone()),
+                        VersionedPayload::tombstone(),
+                    ));
+                    pre_images.push((operation_index, pre_image));
+                    overlay_effects.push((key.clone(), OverlayPresence::Absent));
+                }
+            }
+        }
+        for (key, presence) in overlay_effects {
+            session.set_overlay(table_name, &key, presence);
+        }
+        for (operation_index, pre_image) in pre_images {
+            session.park_pre_image(operation_index, pre_image);
+        }
+        let operations = NonEmpty::try_from_vec(operations).map_err(|_| Error::EmptyCommit {
+            table: request.table().name().as_str().to_owned(),
+        })?;
+        let (commit_sequence, snapshot) = session.append_entry(operations);
+        Ok(crate::CommitReceipt::new(
+            *request.table().name(),
+            commit_sequence,
+            snapshot,
+            request.operation_count(),
+        ))
+    }
+
+    /// What the engaged session plus committed state say about a key:
+    /// the session overlay wins, committed state answers otherwise —
+    /// exactly what a sequence of direct writes would each have
+    /// observed at its own commit point.
+    fn staged_key_present(
+        &self,
+        session: &StagingSession,
+        table_name: &str,
+        key: &crate::RecordKey,
+        committed: impl FnOnce() -> Result<bool>,
+    ) -> Result<bool> {
+        match session.overlay_presence(table_name, key) {
+            Some(OverlayPresence::Present) => Ok(true),
+            Some(OverlayPresence::Absent) => Ok(false),
+            None => committed(),
+        }
+    }
+
+    /// The payload bytes a staged retract removes: the session's last
+    /// buffered upsert for the key when one exists, the committed row
+    /// otherwise. `None` when the key is absent everywhere — the
+    /// caller's typed not-found.
+    fn staged_pre_image(
+        &self,
+        session: &StagingSession,
+        table_name: &str,
+        key: &crate::RecordKey,
+        committed: impl FnOnce() -> Result<Option<VersionedPayload>>,
+    ) -> Result<Option<Vec<u8>>> {
+        match session.overlay_presence(table_name, key) {
+            Some(OverlayPresence::Absent) => Ok(None),
+            Some(OverlayPresence::Present) => {
+                let effects = session.overlay_effects_for_table(table_name);
+                let last_upsert = effects
+                    .iter()
+                    .rev()
+                    .find(|(effect_key, _)| *effect_key == key)
+                    .and_then(|(_, effect)| match effect {
+                        OverlayEffect::Upsert(bytes) => Some(bytes.to_vec()),
+                        OverlayEffect::Remove => None,
+                    });
+                match last_upsert {
+                    Some(bytes) => Ok(Some(bytes)),
+                    // The overlay says present but the presence came
+                    // from committed state (for example a mutate of a
+                    // committed row records Present without the session
+                    // having asserted it first) — fall through.
+                    None => {
+                        Ok(committed()?.and_then(|payload| payload.bytes().map(<[u8]>::to_vec)))
+                    }
+                }
+            }
+            None => Ok(committed()?.and_then(|payload| payload.bytes().map(<[u8]>::to_vec))),
+        }
+    }
+
+    fn staged_match_records<RecordValue>(
+        &self,
+        session: &StagingSession,
+        query: QueryPlan<RecordValue>,
+    ) -> Result<QuerySnapshot<RecordValue>>
+    where
+        RecordValue: EngineStoredValue,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let committed: Vec<(String, RecordValue)> = self
+            .storage
+            .read(|transaction| query.table().sema_table().iter(transaction))?;
+        let mut rows: BTreeMap<String, RecordValue> = committed.into_iter().collect();
+        for (key, effect) in session.overlay_effects_for_table(query.table().name().as_str()) {
+            match effect {
+                OverlayEffect::Upsert(bytes) => {
+                    rows.insert(
+                        key.to_owned_string(),
+                        Self::decode_staged_payload(bytes, query.table().name().as_str())?,
+                    );
+                }
+                OverlayEffect::Remove => {
+                    rows.remove(&key.to_owned_string());
+                }
+            }
+        }
+        let database_marker = crate::DatabaseMarker::new(
+            session.engaged_commit_sequence(),
+            session.engaged_snapshot(),
+        );
+        let records: Vec<RecordValue> = match query.read_plan().node() {
+            crate::ReadPlanNode::AllRows => rows.into_values().collect(),
+            crate::ReadPlanNode::ByKey(key) => {
+                rows.remove(&key.to_owned_string()).into_iter().collect()
+            }
+            crate::ReadPlanNode::ByKeyRange(range) => rows
+                .into_iter()
+                .filter(|(key, _)| range.contains(&crate::RecordKey::new(key.clone())))
+                .map(|(_, record)| record)
+                .collect(),
+            node => {
+                return Err(Error::UnsupportedReadPlan {
+                    operator: node.operator(),
+                });
+            }
+        };
+        Ok(QuerySnapshot::new(
+            SemaOperation::Match,
+            *query.table().name(),
+            database_marker,
+            records,
+        ))
+    }
+
+    fn staged_match_identified<RecordValue>(
+        &self,
+        session: &StagingSession,
+        query: IdentifiedQueryPlan<RecordValue>,
+    ) -> Result<IdentifiedQuerySnapshot<RecordValue>>
+    where
+        RecordValue: EngineStoredValue,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let committed: Vec<(u64, RecordValue)> = self
+            .storage
+            .read(|transaction| query.table().sema_table().iter(transaction))?;
+        let mut rows: BTreeMap<u64, RecordValue> = committed.into_iter().collect();
+        for (key, effect) in session.overlay_effects_for_table(query.table().name().as_str()) {
+            let crate::RecordKey::Identifier(identifier) = key else {
+                continue;
+            };
+            match effect {
+                OverlayEffect::Upsert(bytes) => {
+                    rows.insert(
+                        identifier.value(),
+                        Self::decode_staged_payload(bytes, query.table().name().as_str())?,
+                    );
+                }
+                OverlayEffect::Remove => {
+                    rows.remove(&identifier.value());
+                }
+            }
+        }
+        let database_marker = crate::DatabaseMarker::new(
+            session.engaged_commit_sequence(),
+            session.engaged_snapshot(),
+        );
+        let records: Vec<IdentifiedRecord<RecordValue>> = match query.read_plan().node() {
+            crate::IdentifiedReadPlanNode::AllRows => rows
+                .into_iter()
+                .map(|(identifier, record)| {
+                    IdentifiedRecord::new(RecordIdentifier::new(identifier), record)
+                })
+                .collect(),
+            crate::IdentifiedReadPlanNode::ByIdentifier(identifier) => rows
+                .remove(&identifier.value())
+                .map(|record| IdentifiedRecord::new(*identifier, record))
+                .into_iter()
+                .collect(),
+            crate::IdentifiedReadPlanNode::ByIdentifierRange(range) => rows
+                .into_iter()
+                .filter_map(|(identifier, record)| {
+                    let identifier = RecordIdentifier::new(identifier);
+                    if range.contains(identifier) {
+                        Some(IdentifiedRecord::new(identifier, record))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        };
+        Ok(IdentifiedQuerySnapshot::new(
+            SemaOperation::Match,
+            *query.table().name(),
+            database_marker,
+            records,
+        ))
+    }
+
+    fn decode_staged_payload<RecordValue>(bytes: &[u8], table: &str) -> Result<RecordValue>
+    where
+        RecordValue: EngineStoredValue,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        rkyv::from_bytes::<RecordValue, rancor::Error>(bytes).map_err(|source| {
+            Error::VersionedPayloadDecode {
+                table: table.to_owned(),
+                message: source.to_string(),
+            }
+        })
+    }
+
+    fn record_present<RecordValue>(
+        &self,
+        table: &TableReference<RecordValue>,
+        key: &crate::RecordKey,
+    ) -> Result<bool>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        Ok(self
+            .storage
+            .read(|transaction| table.sema_table().get(transaction, key.to_owned_string()))?
+            .is_some())
+    }
+
+    fn identified_record_present<RecordValue>(
+        &self,
+        table: &IdentifiedTableReference<RecordValue>,
+        identifier: RecordIdentifier,
+    ) -> Result<bool>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        Ok(self
+            .storage
+            .read(|transaction| table.sema_table().get(transaction, identifier.value()))?
+            .is_some())
+    }
+
     /// Every registered family identity, in catalog order.
     fn family_inventory(&self) -> Vec<FamilyIdentity> {
         self.catalog
@@ -1828,11 +2838,11 @@ impl Engine {
     }
 
     fn next_snapshot(&self) -> Result<SnapshotIdentifier> {
-        Ok(self.latest_snapshot()?.next())
+        Ok(self.committed_snapshot()?.next())
     }
 
     fn next_commit_sequence(&self) -> Result<crate::CommitSequence> {
-        Ok(self.current_commit_sequence()?.next())
+        Ok(self.committed_commit_sequence()?.next())
     }
 
     fn database_marker_from_values(

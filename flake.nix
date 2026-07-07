@@ -129,6 +129,11 @@
             cargoTestExtraArgs = "--test operation_log";
           });
 
+          test-staging = craneLib.cargoTest (commonArgs // {
+            inherit cargoArtifacts;
+            cargoTestExtraArgs = "--test staging";
+          });
+
           test-subscriptions = craneLib.cargoTest (commonArgs // {
             inherit cargoArtifacts;
             cargoTestExtraArgs = "--test subscriptions";

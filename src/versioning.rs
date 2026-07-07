@@ -218,6 +218,18 @@ impl FamilyIdentity {
         EntryDigest::update_bytes(hasher, self.schema_hash.bytes());
         EntryDigest::update_bytes(hasher, self.table_name.as_bytes());
     }
+
+    /// The durable next-record-identifier counter key for this
+    /// family's table — the same key [`crate::TableName`] derives, so
+    /// a staged identified assert advances exactly the counter the
+    /// direct write would have.
+    pub(crate) fn identified_counter_key(&self) -> String {
+        format!(
+            "{}:{}",
+            self.table_name,
+            crate::table::IDENTIFIED_COUNTER_SUFFIX
+        )
+    }
 }
 
 impl std::fmt::Display for FamilyIdentity {

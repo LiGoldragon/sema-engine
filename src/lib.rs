@@ -24,6 +24,7 @@ pub mod query;
 pub mod record;
 pub mod sequence;
 pub mod snapshot;
+pub mod staging;
 pub mod subscribe;
 pub mod table;
 pub mod versioning;
@@ -60,6 +61,10 @@ pub use sema::{
 };
 pub use sequence::CommitSequence;
 pub use snapshot::{DatabaseMarker, SnapshotIdentifier};
+pub use staging::{
+    DeltaAnnouncer, DiscardStagedReceipt, MaterializeStagedReceipt, StageReceipt,
+    StagedGroupSummary, StagedOperationGroup,
+};
 pub use subscribe::{
     DeltaKind, InitialSnapshot, SequenceRange, SinkError, SubscriptionDeliveryFailure,
     SubscriptionDeliveryMode, SubscriptionDelta, SubscriptionEvent, SubscriptionFanoutFailure,

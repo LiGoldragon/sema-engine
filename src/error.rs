@@ -176,6 +176,47 @@ pub enum Error {
         acknowledged: EntryDigest,
     },
 
+    #[error(
+        "a staging session is already engaged; park or abandon it before beginning another build"
+    )]
+    StagingSessionEngaged,
+
+    #[error("no staging session is engaged; {surface} requires begin_staged_group first")]
+    StagingSessionNotEngaged { surface: &'static str },
+
+    #[error(
+        "staging slot is occupied by a parked operation group; materialize or discard it first"
+    )]
+    StagingSlotOccupied,
+
+    #[error("staging slot is empty: no staged operation group for {surface}")]
+    StagingSlotEmpty { surface: &'static str },
+
+    #[error(
+        "staging base moved: the store advanced to commit sequence {sequence} after the staged \
+         group was built; the stale group is refused"
+    )]
+    StagingBaseMoved { sequence: u64 },
+
+    #[error(
+        "staged group digest mismatch at commit sequence {sequence}: staged {staged}, \
+         recomputed {computed}"
+    )]
+    StagedGroupDigestMismatch {
+        sequence: u64,
+        staged: EntryDigest,
+        computed: EntryDigest,
+    },
+
+    #[error(
+        "staged head mismatch: materialization produced {produced}, staged prospective head \
+         is {staged}"
+    )]
+    StagedHeadMismatch {
+        staged: EntryDigest,
+        produced: EntryDigest,
+    },
+
     #[error("subscription registry lock poisoned")]
     SubscriptionRegistryPoisoned,
 
