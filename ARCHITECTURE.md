@@ -651,6 +651,17 @@ projection declaration reads as surface syntax — is not yet designed; it is
 reserved for a psyche design session. This crate therefore names the fields it
 consumes from a declaration without depending on their surface form.
 
+**Stored-record identity basis:** the family-closure hash that the
+generated-descriptor chain used as its stored-record identity basis has been
+retired from schema-language along with the families construct. The successor
+identity basis for stored records is not yet chosen; it is pending the same
+`sema.schema` document-kind design session. Schema-language's per-declaration
+nominal-identifier and core-hash machinery is the available foundation and the
+candidate basis, but the binding — how a stored record's identity derives from
+it — is undesigned here and reserved for that session. That is the target; as
+current state the engine still keys stored-record identity on the per-family
+`SchemaHash` it persists in its catalog.
+
 This is the target, not the current state. Component daemons still carry
 hand-written descriptor paths — for example spirit's guardian journal and
 production migration hand-construct their `TableDefinition` declarations. The
