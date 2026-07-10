@@ -629,16 +629,35 @@ production handover.
 
 **Status:** integrated into the brilliant macro library pattern per `reports/designer/326-v13-spirit-complete-schema-vision.md §3` (schemas as macro-pattern instance).
 
-**Role:** this crate is the typed database engine. It owns the `Engine` handle, the typed-table machinery, the `CommitSequence` high-water-mark contract, and the redb storage adapter. Per-component daemons consume this crate by declaring storage types in their schemas; the macro emits the redb table descriptors that bind those storage types into `Engine`.
+**Role:** this crate is the typed database engine. It owns the `Engine` handle, the typed-table machinery, the `CommitSequence` high-water-mark contract, and the redb storage adapter. Per-component daemons consume this crate by declaring their storage types in a dedicated per-component schema document — the `sema.schema` document kind (existing usage: `orchestrate/schema/sema.schema`, `spirit/schema/sema.schema`, each generated into `src/schema/sema.rs`) — from which the macro emits the redb table descriptors that bind those storage types into `Engine`.
 
 **Integration target:** typed database engine; the macro emits sema-engine
-table descriptors from storage type declarations in component schemas. The
-schema-language storage block (per `/326-v13`) declares per-component
-records, indices, identity style, and projections; the macro lowers these
-into `TableDescriptor` or `IdentifiedTableDescriptor` constants the
-component daemon registers with its `Engine` at startup. The schema-engine
-upgrade replaces hand-written `TableDefinition` declarations with
-macro-emitted descriptors derived from the `.schema` storage block.
+table descriptors from the storage-type declarations in a component's
+`sema.schema` document. Each declaration names one stored record type together
+with the parts this engine consumes from it — its record type, its key or
+identity style, and its indices and projections. The macro lowers these into
+`TableDescriptor` or `IdentifiedTableDescriptor` constants the component daemon
+registers with its `Engine` at startup. Every descriptor is generated from a
+declaration: no daemon hand-constructs a descriptor.
+
+The `sema.schema` document kind is the settled declaration surface; the
+schema-language architecture records it as a distinct document kind whose file
+kind fixes the storage-declaration root type (see that repository's "Schema
+document kinds"). It supersedes two earlier framings of the same vision: the
+schema-language storage block direction (per `/326-v13`), and before it the
+retired `Family.(…)` namespace-head construct, which was the narrow,
+mis-shaped first implementation. The exact entry shape — how an index or
+projection declaration reads as surface syntax — is not yet designed; it is
+reserved for a psyche design session. This crate therefore names the fields it
+consumes from a declaration without depending on their surface form.
+
+This is the target, not the current state. Component daemons still carry
+hand-written descriptor paths — for example spirit's guardian journal and
+production migration hand-construct their `TableDefinition` declarations. The
+schema-engine upgrade replaces those hand-written declarations with
+macro-emitted descriptors derived from the component's `sema.schema` document,
+and the surviving hand-written paths are drift to be eliminated as each
+component converts.
 
 **References:**
 - `reports/designer/326-v13-spirit-complete-schema-vision.md` — schema language + macro pattern
