@@ -19,6 +19,71 @@ impl VersioningPolicy {
     }
 }
 
+/// The raw-versioned-entry budget a component elects before it requests
+/// compaction. A checkpoint preserves the current typed view while compacting
+/// entries beyond this budget; it is not an unacknowledged mirror substitute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VersionedHistoryRetention {
+    maximum_live_entries: u64,
+}
+
+impl VersionedHistoryRetention {
+    pub const fn new(maximum_live_entries: u64) -> Self {
+        Self {
+            maximum_live_entries,
+        }
+    }
+
+    pub const fn maximum_live_entries(&self) -> u64 {
+        self.maximum_live_entries
+    }
+}
+
+/// The durable acknowledgement that permits a checkpoint-covered prefix to
+/// leave the local replay and outbox planes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionedHistoryAcknowledgement {
+    /// No external replay or mirror consumer is configured. The verified local
+    /// checkpoint is the complete crash-recovery artifact.
+    LocalCheckpoint,
+    /// A configured mirror has durably acknowledged this exact history head.
+    Mirror(crate::MirrorHead),
+}
+
+/// The outcome of a checkpoint-backed version-history compaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VersionedHistoryCompaction {
+    compacted_entries: u64,
+    retained_entries: u64,
+    checkpoint_sequence: Option<crate::CheckpointSequence>,
+}
+
+impl VersionedHistoryCompaction {
+    pub(crate) const fn new(
+        compacted_entries: u64,
+        retained_entries: u64,
+        checkpoint_sequence: Option<crate::CheckpointSequence>,
+    ) -> Self {
+        Self {
+            compacted_entries,
+            retained_entries,
+            checkpoint_sequence,
+        }
+    }
+
+    pub const fn compacted_entries(&self) -> u64 {
+        self.compacted_entries
+    }
+
+    pub const fn retained_entries(&self) -> u64 {
+        self.retained_entries
+    }
+
+    pub const fn checkpoint_sequence(&self) -> Option<crate::CheckpointSequence> {
+        self.checkpoint_sequence
+    }
+}
+
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct VersionedStoreName(String);
 

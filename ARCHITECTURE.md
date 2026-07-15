@@ -444,8 +444,12 @@ order — and persists two shapes durably in one write transaction:
 artifact of the log: the log already contains everything the
 checkpoint folds, so logging the fold would make history describe
 itself. Checkpoint creation advances no `CommitSequence` and no
-snapshot. The same reasoning means checkpoints never truncate the log;
-they bound how much of it a restore or rebuild must refold.
+snapshot. A checkpoint initially bounds how much a restore or rebuild must
+refold. An explicit typed history-retention request can then compact the
+checkpoint-covered prefix only after its configured recovery acknowledgement:
+the verified local checkpoint when no external consumer exists, or a durable
+mirror acknowledgement when one does. The remaining suffix continues from the
+checkpoint's covered digest.
 
 The view digest and the store schema hash deliberately exclude table
 coordinates: a table rename keeps both stable. The view digest includes
@@ -521,8 +525,9 @@ domain-keyed public choke points, so engine-identified families
 cannot replay through it (replaying an identified assert would
 re-mint identifiers). Identified families restore through checkpoint
 import and rebuild-from-log, which preserve identifiers and counters.
-Checkpoint, import, and rebuild require a complete versioned log: a
-store that wrote history before enabling versioning gets a typed
+Checkpoint, import, and rebuild require a complete versioned history: either
+the retained versioned log, or one verified checkpoint plus its retained suffix.
+A store that wrote history before enabling versioning gets a typed
 `VersionedLogIncomplete` error.
 
 The open-path derived-slot refold (layout-4-to-5 upgrade, above) is a

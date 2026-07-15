@@ -167,6 +167,14 @@ pub enum Error {
     MirrorHeadUnknown { sequence: u64 },
 
     #[error(
+        "version-history compaction through sequence {required} requires a durable mirror acknowledgement, but the acknowledged head is {acknowledged:?}"
+    )]
+    HistoryCompactionUnacknowledged {
+        required: u64,
+        acknowledged: Option<u64>,
+    },
+
+    #[error(
         "mirror head fork at sequence {sequence}: outbox recorded {recorded}, \
          acknowledgement names {acknowledged}"
     )]

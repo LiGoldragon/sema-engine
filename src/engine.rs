@@ -1506,6 +1506,67 @@ impl Engine {
         Ok(Some(checkpoint))
     }
 
+    /// Compact a verified checkpoint-covered history prefix once the caller
+    /// supplies the acknowledgement topology that owns replay recovery. The
+    /// method never deletes an unacknowledged mirror outbox row: a configured
+    /// mirror must acknowledge at least the checkpoint head, while a component
+    /// with no external replay consumer explicitly names its verified local
+    /// checkpoint as the recovery acknowledgement.
+    pub fn compact_versioned_history(
+        &self,
+        retention: crate::VersionedHistoryRetention,
+        acknowledgement: crate::VersionedHistoryAcknowledgement,
+    ) -> Result<crate::VersionedHistoryCompaction> {
+        let retained_before_checkpoint = self.versioned_commit_log()?.len() as u64;
+        if retained_before_checkpoint <= retention.maximum_live_entries() {
+            return Ok(crate::VersionedHistoryCompaction::new(
+                0,
+                retained_before_checkpoint,
+                self.latest_checkpoint()?.map(|checkpoint| checkpoint.metadata().sequence()),
+            ));
+        }
+
+        // Checkpoint first, in its own durable transaction. A crash before the
+        // following prefix deletion leaves extra history, never a missing view.
+        self.checkpoint()?;
+        let checkpoint = self
+            .latest_checkpoint()?
+            .expect("checkpoint just persisted by Engine::checkpoint");
+        let covered = checkpoint.metadata().covered().last();
+        if let crate::VersionedHistoryAcknowledgement::Mirror(head) = acknowledgement {
+            if head.commit_sequence() < covered {
+                return Err(Error::HistoryCompactionUnacknowledged {
+                    required: covered.value(),
+                    acknowledged: Some(head.commit_sequence().value()),
+                });
+            }
+            let durable = self.mirror_head()?.map(|stored| stored.commit_sequence().value());
+            if durable.is_none_or(|sequence| sequence < covered.value()) {
+                return Err(Error::HistoryCompactionUnacknowledged {
+                    required: covered.value(),
+                    acknowledged: durable,
+                });
+            }
+        }
+
+        let _write_guard = self.write_guard();
+        let log = self.log_plane();
+        let (commit_keys, versioned_keys) = log.keys_through(covered)?;
+        let counts = log
+            .counts()?
+            .after_removing(commit_keys.len(), versioned_keys.len());
+        let outbox_keys = self.outbox_plane().keys_through(covered)?;
+        self.storage.write(|transaction| {
+            CommitLog::compact_through(transaction, &commit_keys, &versioned_keys, counts)?;
+            Outbox::compact_acknowledged_through(transaction, &outbox_keys)
+        })?;
+        Ok(crate::VersionedHistoryCompaction::new(
+            retained_before_checkpoint.saturating_sub(counts.versioned()),
+            counts.versioned(),
+            Some(checkpoint.metadata().sequence()),
+        ))
+    }
+
     /// Rebuild the materialized family tables from the authoritative
     /// versioned log: the fold *is* the definition of the view. Folds
     /// the latest checkpoint's rows (when one exists) plus the log

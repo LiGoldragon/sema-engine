@@ -179,6 +179,29 @@ impl<'engine> Outbox<'engine> {
         )
     }
 
+    /// Read the outbox prefix that a verified checkpoint covers.
+    pub(crate) fn keys_through(&self, through: CommitSequence) -> Result<Vec<u64>> {
+        Ok(self
+            .storage
+            .read(|transaction| OUTBOX.iter(transaction))?
+            .into_iter()
+            .map(|(sequence, _entry)| sequence)
+            .filter(|sequence| *sequence <= through.value())
+            .collect())
+    }
+
+    /// Remove only a previously-read acknowledged outbox prefix. The checkpoint
+    /// containing its state is persisted before this method is called.
+    pub(crate) fn compact_acknowledged_through(
+        transaction: &WriteTransaction,
+        keys: &[u64],
+    ) -> sema::Result<()> {
+        for sequence in keys {
+            OUTBOX.remove(transaction, *sequence)?;
+        }
+        Ok(())
+    }
+
     /// Record a server-confirmed mirror head, advancing the durable
     /// shipped cursor. Idempotent: a head at or behind the cursor is a
     /// typed no-op. A head naming a sequence with no outbox row is

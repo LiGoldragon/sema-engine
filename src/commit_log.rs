@@ -190,6 +190,48 @@ impl<'engine> CommitLog<'engine> {
         COUNTERS.insert(transaction, VERSIONED_LOG_COUNT_KEY, &versioned_count)
     }
 
+    /// The durable keys in the compactable prefix. Collection uses the
+    /// read-only plane before the caller opens its final deletion transaction.
+    pub(crate) fn keys_through(
+        &self,
+        through: CommitSequence,
+    ) -> Result<(Vec<u64>, Vec<u64>)> {
+        let commit_keys = self
+            .storage
+            .read(|transaction| COMMIT_LOG.iter(transaction))?
+            .into_iter()
+            .map(|(sequence, _entry)| sequence)
+            .filter(|sequence| *sequence <= through.value())
+            .collect();
+        let versioned_keys = self
+            .storage
+            .read(|transaction| VERSIONED_COMMIT_LOG.iter(transaction))?
+            .into_iter()
+            .map(|(sequence, _entry)| sequence)
+            .filter(|sequence| *sequence <= through.value())
+            .collect();
+        Ok((commit_keys, versioned_keys))
+    }
+
+    /// Remove a previously-read compacted prefix from both log projections and
+    /// replace their counts with the remaining suffix counts. The caller has
+    /// already persisted a verified checkpoint covering these rows.
+    pub(crate) fn compact_through(
+        transaction: &WriteTransaction,
+        commit_keys: &[u64],
+        versioned_keys: &[u64],
+        remaining: LogCounts,
+    ) -> sema::Result<()> {
+        for sequence in commit_keys {
+            COMMIT_LOG.remove(transaction, *sequence)?;
+        }
+        for sequence in versioned_keys {
+            VERSIONED_COMMIT_LOG.remove(transaction, *sequence)?;
+        }
+        COUNTERS.insert(transaction, COMMIT_LOG_COUNT_KEY, &remaining.commits())?;
+        COUNTERS.insert(transaction, VERSIONED_LOG_COUNT_KEY, &remaining.versioned())
+    }
+
     /// Refold the layout-introduced derived slots (the persisted
     /// chain-head digest and the two log-count counters) from the
     /// store's complete versioned log, then re-stamp the supplied layout
@@ -284,5 +326,12 @@ impl LogCounts {
     /// The versioned-log count after one more versioned entry lands.
     pub(crate) fn next_versioned(self) -> u64 {
         self.versioned + 1
+    }
+
+    pub(crate) fn after_removing(self, commits: usize, versioned: usize) -> Self {
+        Self::new(
+            self.commits.saturating_sub(commits as u64),
+            self.versioned.saturating_sub(versioned as u64),
+        )
     }
 }
