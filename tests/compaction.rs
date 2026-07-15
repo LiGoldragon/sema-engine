@@ -70,7 +70,9 @@ impl Fixture {
 fn local_checkpoint_compaction_bounds_raw_history_and_preserves_restart_view() {
     let fixture = Fixture::new();
     let mut engine = fixture.open();
-    let table = engine.register_table(fixture.table()).expect("table registers");
+    let table = engine
+        .register_table(fixture.table())
+        .expect("table registers");
     engine
         .assert(Assertion::new(table, Thought::new("alpha", "first")))
         .expect("initial write");
@@ -86,21 +88,44 @@ fn local_checkpoint_compaction_bounds_raw_history_and_preserves_restart_view() {
         .expect("verified local checkpoint compacts history");
     assert_eq!(compacted.compacted_entries(), 2);
     assert_eq!(compacted.retained_entries(), 0);
-    assert!(engine
-        .versioned_commit_log()
-        .expect("versioned suffix reads")
-        .is_empty());
+    assert!(
+        engine
+            .versioned_commit_log()
+            .expect("versioned suffix reads")
+            .is_empty()
+    );
+    engine
+        .mutate(Mutation::new(table, Thought::new("alpha", "newest")))
+        .expect("post-compaction write");
+    engine
+        .compact_versioned_history(
+            VersionedHistoryRetention::new(0),
+            VersionedHistoryAcknowledgement::LocalCheckpoint,
+        )
+        .expect("subsequent checkpoint replaces its compacted predecessor");
+    assert_eq!(
+        engine
+            .latest_checkpoint()
+            .expect("latest checkpoint reads")
+            .expect("checkpoint exists")
+            .metadata()
+            .previous_checkpoint_digest(),
+        None,
+        "compaction retains one root checkpoint rather than accumulating a chain"
+    );
 
     drop(engine);
     let mut reopened = fixture.open();
-    let table = reopened.register_table(fixture.table()).expect("table registers");
+    let table = reopened
+        .register_table(fixture.table())
+        .expect("table registers");
     reopened
         .rebuild_from_log(&ThoughtDirectory { table })
         .expect("checkpoint rebuild succeeds after restart");
     let snapshot = reopened
         .match_records(QueryPlan::all(table))
         .expect("current view queries");
-    assert_eq!(snapshot.records(), &[Thought::new("alpha", "current")]);
+    assert_eq!(snapshot.records(), &[Thought::new("alpha", "newest")]);
 }
 
 struct ThoughtDirectory {

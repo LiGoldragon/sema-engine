@@ -1522,7 +1522,8 @@ impl Engine {
             return Ok(crate::VersionedHistoryCompaction::new(
                 0,
                 retained_before_checkpoint,
-                self.latest_checkpoint()?.map(|checkpoint| checkpoint.metadata().sequence()),
+                self.latest_checkpoint()?
+                    .map(|checkpoint| checkpoint.metadata().sequence()),
             ));
         }
 
@@ -1540,7 +1541,9 @@ impl Engine {
                     acknowledged: Some(head.commit_sequence().value()),
                 });
             }
-            let durable = self.mirror_head()?.map(|stored| stored.commit_sequence().value());
+            let durable = self
+                .mirror_head()?
+                .map(|stored| stored.commit_sequence().value());
             if durable.is_none_or(|sequence| sequence < covered.value()) {
                 return Err(Error::HistoryCompactionUnacknowledged {
                     required: covered.value(),
@@ -1556,14 +1559,53 @@ impl Engine {
             .counts()?
             .after_removing(commit_keys.len(), versioned_keys.len());
         let outbox_keys = self.outbox_plane().keys_through(covered)?;
+        let metadata = checkpoint.metadata();
+        let root_checkpoint = CheckpointMetadata::new(
+            metadata.sequence(),
+            metadata.store_name().clone(),
+            metadata.store_schema_hash(),
+            metadata.family_inventory().clone(),
+            metadata.covered(),
+            metadata.covered_snapshot(),
+            metadata.covered_entry_digest(),
+            metadata.view_digest(),
+            None,
+            metadata.segments().to_vec(),
+        );
+        let checkpoint_keys: Vec<u64> = self
+            .storage
+            .read(|transaction| CHECKPOINTS.iter(transaction))?
+            .into_iter()
+            .map(|(sequence, _metadata)| sequence)
+            .filter(|sequence| *sequence != metadata.sequence().value())
+            .collect();
+        let retained_segments: std::collections::BTreeSet<[u8; 32]> = metadata
+            .segments()
+            .iter()
+            .map(|reference| *reference.digest().bytes())
+            .collect();
+        let segment_keys: Vec<[u8; 32]> = self
+            .storage
+            .read(|transaction| CHECKPOINT_SEGMENTS.iter(transaction))?
+            .into_iter()
+            .map(|(digest, _segment)| digest)
+            .filter(|digest| !retained_segments.contains(digest))
+            .collect();
         self.storage.write(|transaction| {
             CommitLog::compact_through(transaction, &commit_keys, &versioned_keys, counts)?;
-            Outbox::compact_acknowledged_through(transaction, &outbox_keys)
+            Outbox::compact_acknowledged_through(transaction, &outbox_keys)?;
+            for sequence in &checkpoint_keys {
+                CHECKPOINTS.remove(transaction, *sequence)?;
+            }
+            for digest in &segment_keys {
+                CHECKPOINT_SEGMENTS.remove(transaction, digest)?;
+            }
+            CHECKPOINTS.insert(transaction, metadata.sequence().value(), &root_checkpoint)
         })?;
         Ok(crate::VersionedHistoryCompaction::new(
             retained_before_checkpoint.saturating_sub(counts.versioned()),
             counts.versioned(),
-            Some(checkpoint.metadata().sequence()),
+            Some(root_checkpoint.sequence()),
         ))
     }
 

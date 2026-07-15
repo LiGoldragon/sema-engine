@@ -192,10 +192,7 @@ impl<'engine> CommitLog<'engine> {
 
     /// The durable keys in the compactable prefix. Collection uses the
     /// read-only plane before the caller opens its final deletion transaction.
-    pub(crate) fn keys_through(
-        &self,
-        through: CommitSequence,
-    ) -> Result<(Vec<u64>, Vec<u64>)> {
+    pub(crate) fn keys_through(&self, through: CommitSequence) -> Result<(Vec<u64>, Vec<u64>)> {
         let commit_keys = self
             .storage
             .read(|transaction| COMMIT_LOG.iter(transaction))?
