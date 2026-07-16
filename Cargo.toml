@@ -16,8 +16,8 @@ path = "src/lib.rs"
 blake3 = "1"
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 sema = { git = "https://github.com/LiGoldragon/sema.git", rev = "51d7927c872f0df12791bad8d39a4db6433b01a1" }
-signal-frame = { git = "https://github.com/LiGoldragon/signal-frame.git", rev = "d202e20d2171084e1425696e452686862945f7fb", default-features = false }
-signal-sema = { git = "https://github.com/LiGoldragon/signal-sema.git", rev = "924832cdb529db3348dd93e09457a385fd57efd8", default-features = false }
+signal-frame = { git = "https://github.com/LiGoldragon/signal-frame.git", rev = "f46872e7e8edae5264c892443d415a273b231234", default-features = false }
+signal-sema = { git = "https://github.com/LiGoldragon/signal-sema.git", rev = "4f3a24e6677ab9d200672851016c4c760c1e36e8", default-features = false }
 thiserror = "2"
 
 [dev-dependencies]
