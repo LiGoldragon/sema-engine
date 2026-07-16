@@ -13,6 +13,7 @@
 pub mod catalog;
 pub mod checkpoint;
 pub mod commit_log;
+pub mod compaction;
 pub mod engine;
 pub mod error;
 pub mod fold;
@@ -35,6 +36,7 @@ pub use checkpoint::{
     CheckpointSequence, CommitSequenceRange, FamilyInventory, IdentifiedCounter,
     PortableCheckpoint, SegmentDigest, SegmentReference,
 };
+pub use compaction::{CompactionFault, CompactionIntent, CompactionPhase};
 pub use engine::{Engine, EngineOpen, StorageReader};
 pub use error::{Error, Result};
 pub use fold::{FamilyDirectory, RebuildReceipt, RowMaterializer, ViewDigest, ViewRow};

@@ -6,9 +6,10 @@ use std::path::PathBuf;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, Engine, EngineOpen, EngineRecord, FamilyName, Mutation, QueryPlan, RecordKey,
-    SchemaHash, SchemaVersion, TableDescriptor, TableName, VersionedHistoryAcknowledgement,
-    VersionedHistoryRetention, VersionedRecoveryTopology, VersionedStoreName, VersioningPolicy,
+    Assertion, CompactionFault, Engine, EngineOpen, EngineRecord, FamilyName, Mutation, QueryPlan,
+    RecordKey, Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName,
+    VersionedHistoryAcknowledgement, VersionedHistoryRetention, VersionedRecoveryTopology,
+    VersionedStoreName, VersioningPolicy,
 };
 use tempfile::TempDir;
 
@@ -207,6 +208,92 @@ fn configured_finite_policy_compacts_at_lifecycle_boundary() {
         engine.versioned_commit_log().expect("log reads").is_empty(),
         "the finite configured budget is enforced at the lifecycle boundary"
     );
+}
+
+#[test]
+fn every_durable_compaction_phase_recovers_retraction_heavy_history_after_restart() {
+    for fault in [
+        CompactionFault::AfterPlanPersisted,
+        CompactionFault::AfterRetractionsApplied,
+        CompactionFault::AfterCheckpointPublished,
+    ] {
+        let fixture = Fixture::new();
+        let mut engine = fixture.open_zero_retention();
+        let table = engine
+            .register_table(fixture.table())
+            .expect("table registers");
+        for sequence in 0..12 {
+            engine
+                .assert(Assertion::new(
+                    table,
+                    Thought::new(format!("thought-{sequence}"), "retained or retired"),
+                ))
+                .expect("history write");
+        }
+        engine.begin_compaction().expect("compaction begins");
+        for sequence in 0..9 {
+            engine
+                .retract(Retraction::new(
+                    table,
+                    RecordKey::new(format!("thought-{sequence}")),
+                ))
+                .expect("retraction enters complete staged plan");
+        }
+        if fault == CompactionFault::AfterPlanPersisted {
+            engine.inject_compaction_fault(fault);
+            assert!(
+                engine.park_compaction().is_err(),
+                "fault interrupts after plan"
+            );
+        } else {
+            assert!(engine.park_compaction().expect("plan persists"));
+            engine.inject_compaction_fault(fault);
+            assert!(
+                engine
+                    .resume_compaction(&ThoughtDirectory { table })
+                    .is_err(),
+                "fault interrupts after durable phase"
+            );
+        }
+        drop(engine);
+
+        let mut reopened = fixture.open_zero_retention();
+        let table = reopened
+            .register_table(fixture.table())
+            .expect("table registers after restart");
+        reopened
+            .resume_compaction(&ThoughtDirectory { table })
+            .expect("restart resolves every durable phase before use");
+        assert!(
+            reopened
+                .compaction_intent()
+                .expect("intent reads")
+                .is_none(),
+            "intent clears only after history floor is consistent"
+        );
+        let rows = reopened
+            .match_records(QueryPlan::all(table))
+            .expect("view reads after recovery");
+        assert_eq!(
+            rows.records().len(),
+            3,
+            "all planned rows retract exactly once"
+        );
+        assert!(
+            reopened
+                .versioned_commit_log()
+                .expect("history reads")
+                .is_empty(),
+            "zero policy advances the floor only after verified checkpoint"
+        );
+        assert!(
+            reopened
+                .unshipped_outbox()
+                .expect("local outbox reads")
+                .is_empty(),
+            "local topology does not retain a mirror outbox"
+        );
+    }
 }
 
 struct ThoughtDirectory {

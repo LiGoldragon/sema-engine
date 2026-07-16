@@ -197,6 +197,7 @@ sections that follow realize it.
   the store; schema identity is never hand-supplied. The default
   `EngineOpen` path does not emit payload-bearing version entries.
 - `VersioningPolicy` persists one finite retention budget and one recovery topology on first open. The default is a conservative 4,096 raw entries; components choose a typed finite override. A local-checkpoint topology creates no mirror outbox rows and may compact only when none exist. A mirror topology writes every outbox row transactionally and rejects local-checkpoint compaction; it compacts only through a durable server acknowledgement. Later opens reject a policy that differs from the persisted topology or budget.
+- Multi-table derived-history retraction uses the engine-owned compaction boundary: it persists the complete typed staged plan before any row changes, atomically applies all planned rows and their version/outbox effects, then survives restart through verified checkpoint publication and configured history-floor advancement. Components register their family directory and resolve a pending intent during open before serving.
 - The versioned log is stored in the same `.sema` file as table state.
   A successful write inserts the table mutation, the metadata
   `CommitLogEntry`, and the payload-bearing `VersionedCommitLogEntry` in

@@ -341,6 +341,15 @@ impl<'engine> Staging<'engine> {
             .write(|transaction| STAGING_SLOT.insert(transaction, STAGED_GROUP_KEY, group))?)
     }
 
+    /// Park a group inside an engine-owned transaction, so a durable
+    /// compaction intent and its complete retraction plan appear together.
+    pub(crate) fn park_in(
+        transaction: &sema::WriteTransaction,
+        group: &StagedOperationGroup,
+    ) -> sema::Result<()> {
+        STAGING_SLOT.insert(transaction, STAGED_GROUP_KEY, group)
+    }
+
     /// Clear the slot in its own small transaction — the discard path.
     pub(crate) fn clear(&self) -> Result<()> {
         Ok(self.storage.write(|transaction| {

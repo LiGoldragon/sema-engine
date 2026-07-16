@@ -200,6 +200,18 @@ pub enum Error {
     )]
     StagingSessionEngaged,
 
+    #[error("a durable compaction intent is already pending; resume it before beginning another")]
+    CompactionIntentOccupied,
+
+    #[error("a durable compaction intent advanced without its final planned sequence")]
+    CompactionIntentMissingSequence,
+
+    #[error("verified checkpoint ends at {checkpoint}, behind compaction plan ending at {plan}")]
+    CompactionCheckpointBehind { checkpoint: u64, plan: u64 },
+
+    #[error("deterministic compaction interruption after {phase}")]
+    CompactionInterrupted { phase: &'static str },
+
     #[error("no staging session is engaged; {surface} requires begin_staged_group first")]
     StagingSessionNotEngaged { surface: &'static str },
 

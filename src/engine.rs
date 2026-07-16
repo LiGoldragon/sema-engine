@@ -16,6 +16,7 @@ use crate::checkpoint::{
     CommitSequenceRange, FamilyInventory, IdentifiedCounter, SegmentReference,
 };
 use crate::commit_log::{CommitLog, LogCounts};
+use crate::compaction::{CompactionFault, CompactionIntent, CompactionPhase};
 use crate::fold::{CanonicalView, FamilyDirectory, RebuildReceipt, RowMaterializer, ViewRow};
 use crate::import::{ImportReceipt, ImportSession};
 use crate::log::{CommitLogEntry, CommitLogOperation};
@@ -59,7 +60,7 @@ const STORAGE_LAYOUT_KEY: &str = "engine_storage_layout";
 /// A's bump was additive over the data tables. A store at an older
 /// layout with no versioned log still hard-fails at open and is rebuilt
 /// through checkpoint import or versioned replay.
-const STORAGE_LAYOUT: u64 = 6;
+const STORAGE_LAYOUT: u64 = 7;
 /// The layout of stores written before the layout slot existed.
 const LAYOUT_BEFORE_SLOT: u64 = 1;
 const SUBSCRIPTIONS: sema::Table<u64, SubscriptionRegistration> =
@@ -73,6 +74,9 @@ const CHECKPOINT_SEGMENTS: sema::Table<&'static [u8; 32], CheckpointSegment> =
 const VERSIONING_POLICY: sema::Table<&'static str, VersioningPolicy> =
     sema::Table::new("__sema_engine_versioning_policy");
 const VERSIONING_POLICY_KEY: &str = "configured";
+const COMPACTION_INTENT: sema::Table<&'static str, CompactionIntent> =
+    sema::Table::new("__sema_engine_compaction_intent");
+const COMPACTION_INTENT_KEY: &str = "pending";
 
 pub struct Engine {
     storage: sema::Sema,
@@ -99,6 +103,9 @@ pub struct Engine {
     /// a time; the durable staging slot backs this session across a
     /// park, and the session itself is memory only.
     staging: std::sync::Mutex<Option<StagingSession>>,
+    /// Test-only interruption is an engine-owned typed hook rather than a
+    /// process-global environment switch, making restart recovery deterministic.
+    compaction_fault: std::sync::Mutex<Option<CompactionFault>>,
 }
 
 impl Engine {
@@ -137,6 +144,7 @@ impl Engine {
             versioning_policy: request.versioning_policy().cloned(),
             write_lock: std::sync::Mutex::new(()),
             staging: std::sync::Mutex::new(None),
+            compaction_fault: std::sync::Mutex::new(None),
         })
     }
 
@@ -1533,12 +1541,19 @@ impl Engine {
             ));
         }
 
-        // Checkpoint first, in its own durable transaction. A crash before the
-        // following prefix deletion leaves extra history, never a missing view.
-        self.checkpoint()?;
-        let checkpoint = self
-            .latest_checkpoint()?
-            .expect("checkpoint just persisted by Engine::checkpoint");
+        // Checkpoint first, in its own durable transaction. A previously
+        // published checkpoint already covering the current head is reused;
+        // this is the restart path after a durable compaction intent published
+        // and verified it but crashed before advancing the history floor.
+        let current = self.current_commit_sequence()?;
+        let checkpoint = match self.latest_checkpoint()? {
+            Some(checkpoint) if checkpoint.metadata().covered().last() >= current => checkpoint,
+            _ => {
+                self.checkpoint()?;
+                self.latest_checkpoint()?
+                    .expect("checkpoint just persisted by Engine::checkpoint")
+            }
+        };
         let covered = checkpoint.metadata().covered().last();
         if let VersionedHistoryAcknowledgement::Mirror(head) = acknowledgement {
             if head.commit_sequence() < covered {
@@ -1913,6 +1928,117 @@ impl Engine {
         self.outbox_plane().store_durability()
     }
 
+    /// Begin a durable multi-table compaction plan. The following ordinary
+    /// retractions are buffered, so the complete typed plan is persisted before
+    /// any materialized row can disappear.
+    pub fn begin_compaction(&self) -> Result<()> {
+        if self.compaction_intent()?.is_some() {
+            return Err(Error::CompactionIntentOccupied);
+        }
+        self.begin_staged_group()
+    }
+
+    /// Persist the complete staged retraction plan and its `Planned` intent in
+    /// one storage transaction. No derived row, history row, checkpoint, or
+    /// outbox row changes here.
+    pub fn park_compaction(&self) -> Result<bool> {
+        let _write_guard = self.write_guard();
+        let mut staging = self.staging_guard();
+        let Some(session) = staging.take() else {
+            return Err(Error::StagingSessionNotEngaged {
+                surface: "park_compaction",
+            });
+        };
+        if session.entry_count() == 0 {
+            return Ok(false);
+        }
+        self.ensure_staging_base_current(session.base())?;
+        if self.staging_plane().slot()?.is_some() || self.compaction_intent()?.is_some() {
+            return Err(Error::CompactionIntentOccupied);
+        }
+        let group = session.into_group();
+        self.storage.write(|transaction| {
+            Staging::park_in(transaction, &group)?;
+            COMPACTION_INTENT.insert(
+                transaction,
+                COMPACTION_INTENT_KEY,
+                &CompactionIntent::planned(),
+            )
+        })?;
+        self.interrupt_compaction_at(CompactionFault::AfterPlanPersisted)?;
+        Ok(true)
+    }
+
+    /// Return the durable compaction lifecycle record, if recovery is pending.
+    pub fn compaction_intent(&self) -> Result<Option<CompactionIntent>> {
+        Ok(self
+            .storage
+            .read(|transaction| COMPACTION_INTENT.get(transaction, COMPACTION_INTENT_KEY))?)
+    }
+
+    /// Inject one deterministic interruption after a durable phase. This is a
+    /// test support hook; production code never calls it.
+    pub fn inject_compaction_fault(&self, fault: CompactionFault) {
+        *self
+            .compaction_fault
+            .lock()
+            .expect("engine compaction fault lock poisoned") = Some(fault);
+    }
+
+    /// Resume a parked compaction before a component admits ordinary work.
+    /// `directory` is required only for the one atomic materialization of the
+    /// typed plan; all later phases are engine-owned data planes.
+    pub fn resume_compaction(&self, directory: &dyn FamilyDirectory) -> Result<()> {
+        let Some(intent) = self.compaction_intent()? else {
+            return Ok(());
+        };
+        match intent.phase() {
+            CompactionPhase::Planned => {
+                self.materialize_staged_group(directory)?;
+                self.interrupt_compaction_at(CompactionFault::AfterRetractionsApplied)?;
+                self.resume_compaction(directory)
+            }
+            CompactionPhase::Applied => {
+                let final_sequence = intent
+                    .final_sequence()
+                    .ok_or(Error::CompactionIntentMissingSequence)?;
+                let checkpoint_covers_plan = self.latest_checkpoint()?.is_some_and(|checkpoint| {
+                    checkpoint.metadata().covered().last() >= final_sequence
+                });
+                if !checkpoint_covers_plan {
+                    self.checkpoint()?;
+                }
+                // Loading verifies the published artifact and every segment
+                // before this durable phase advances.
+                let checkpoint = self
+                    .latest_checkpoint()?
+                    .ok_or(Error::CheckpointRowMissing { sequence: 0 })?;
+                if checkpoint.metadata().covered().last() < final_sequence {
+                    return Err(Error::CompactionCheckpointBehind {
+                        checkpoint: checkpoint.metadata().covered().last().value(),
+                        plan: final_sequence.value(),
+                    });
+                }
+                self.storage.write(|transaction| {
+                    COMPACTION_INTENT.insert(
+                        transaction,
+                        COMPACTION_INTENT_KEY,
+                        &CompactionIntent::checkpointed(final_sequence),
+                    )
+                })?;
+                self.interrupt_compaction_at(CompactionFault::AfterCheckpointPublished)?;
+                self.resume_compaction(directory)
+            }
+            CompactionPhase::Checkpointed => {
+                self.compact_configured_versioned_history()?;
+                self.storage.write(|transaction| {
+                    COMPACTION_INTENT.remove(transaction, COMPACTION_INTENT_KEY)
+                })?;
+                Ok(())
+            }
+        }
+    }
+
     /// Engage a staging session: from here until a park or abandon,
     /// every write method buffers into one un-committed operation
     /// group instead of committing, and the session-scoped read
@@ -2115,6 +2241,9 @@ impl Engine {
             }
         }
         let counts = self.log_counts()?;
+        let completes_compaction = self
+            .compaction_intent()?
+            .is_some_and(|intent| intent.is_planned());
         let writes_mirror_outbox = self
             .versioning_policy
             .as_ref()
@@ -2157,6 +2286,13 @@ impl Engine {
             COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &final_snapshot.value())?;
             for (counter_key, next_value) in &identified_advances {
                 IDENTIFIED_COUNTERS.insert(transaction, counter_key.clone(), next_value)?;
+            }
+            if completes_compaction {
+                COMPACTION_INTENT.insert(
+                    transaction,
+                    COMPACTION_INTENT_KEY,
+                    &CompactionIntent::applied(final_sequence),
+                )?;
             }
             Staging::clear_in(transaction)?;
             Ok(())
@@ -2222,6 +2358,23 @@ impl Engine {
 
     fn staging_plane(&self) -> Staging<'_> {
         Staging::new(&self.storage)
+    }
+
+    fn interrupt_compaction_at(&self, phase: CompactionFault) -> Result<()> {
+        let mut injected = self
+            .compaction_fault
+            .lock()
+            .expect("engine compaction fault lock poisoned");
+        if *injected == Some(phase) {
+            *injected = None;
+            let phase = match phase {
+                CompactionFault::AfterPlanPersisted => "plan-persisted",
+                CompactionFault::AfterRetractionsApplied => "retractions-applied",
+                CompactionFault::AfterCheckpointPublished => "checkpoint-published",
+            };
+            return Err(Error::CompactionInterrupted { phase });
+        }
+        Ok(())
     }
 
     /// Acquire the staging-session slot. Poison propagation mirrors
