@@ -3525,14 +3525,13 @@ impl Engine {
         key: RecordKey,
         payload: VersionedPayload,
     ) -> Result<Option<VersionedLogOperation>> {
-        Ok(self
-            .versioning_policy
+        self.versioning_policy
             .as_ref()
             .map(|_| {
                 self.registered_family(&table)
                     .map(|family| VersionedLogOperation::new(operation, family, Some(key), payload))
             })
-            .transpose()?)
+            .transpose()
     }
 
     pub(crate) fn atomic_announce<RecordValue>(
