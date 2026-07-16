@@ -31,17 +31,18 @@ use crate::{
     FamilyIdentity, IdentifiedAssertion, IdentifiedMutation, IdentifiedMutationReceipt,
     IdentifiedQueryPlan, IdentifiedQuerySnapshot, IdentifiedRecord, IdentifiedRetraction,
     IdentifiedTableDescriptor, IdentifiedTableReference, InitialSnapshot, KeyedAssertion,
-    KeyedMutation, QueryPlan, QuerySnapshot, RecordIdentifier, RecordKey, ReplayReceipt, Result, Retraction,
-    SequenceRange, SnapshotIdentifier, StoreSchemaHash, SubscriptionHandle, SubscriptionIdentifier,
-    SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink, TableDescriptor, TableName,
-    TableReference, TableRegistration, VersionedCommitLogEntry, VersionedHistoryAcknowledgement,
-    VersionedLogOperation, VersionedPayload, VersionedRecoveryTopology, VersionedReplay,
-    VersioningPolicy, WriteOperation,
+    KeyedMutation, QueryPlan, QuerySnapshot, RecordIdentifier, RecordKey, ReplayReceipt, Result,
+    Retraction, SequenceRange, SnapshotIdentifier, StoreSchemaHash, SubscriptionHandle,
+    SubscriptionIdentifier, SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink,
+    TableDescriptor, TableName, TableReference, TableRegistration, VersionedCommitLogEntry,
+    VersionedHistoryAcknowledgement, VersionedLogOperation, VersionedPayload,
+    VersionedRecoveryTopology, VersionedReplay, VersioningPolicy, WriteOperation,
 };
 
 const CATALOG: sema::Table<&'static str, TableRegistration> =
     sema::Table::new("__sema_engine_catalog");
-pub(crate) const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
+pub(crate) const COUNTERS: sema::Table<&'static str, u64> =
+    sema::Table::new("__sema_engine_counters");
 pub(crate) const LATEST_COMMIT_SEQUENCE_KEY: &str = "latest_commit_sequence";
 pub(crate) const LATEST_SNAPSHOT_KEY: &str = "latest_snapshot";
 const NEXT_SUBSCRIPTION_KEY: &str = "next_subscription";
@@ -109,7 +110,31 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Open a store only when no durable compaction recovery is pending.
+    /// Call [`Engine::open_recovering`] from a supervised owner when a family
+    /// directory is available to resolve a parked group before serving it.
     pub fn open(request: EngineOpen) -> Result<Self> {
+        let engine = Self::open_unrecovered(request)?;
+        if let Some(intent) = engine.compaction_intent()? {
+            return Err(Error::CompactionRecoveryRequired {
+                phase: intent.phase(),
+            });
+        }
+        Ok(engine)
+    }
+
+    /// Resolve a durable compaction intent before returning a serving engine.
+    /// This is the sole startup surface for components with registered tables.
+    pub fn open_recovering(request: EngineOpen, directory: &dyn FamilyDirectory) -> Result<Self> {
+        let engine = Self::open_unrecovered(request)?;
+        engine.resume_compaction(directory)?;
+        if engine.versioning_policy.is_some() {
+            engine.compact_configured_versioned_history()?;
+        }
+        Ok(engine)
+    }
+
+    fn open_unrecovered(request: EngineOpen) -> Result<Self> {
         let storage = sema::Sema::open_with_schema(request.path(), request.schema())?;
         // Every validation runs before the first engine write: an open
         // that rejects a store must not mutate the store it rejects.
@@ -516,13 +541,16 @@ impl Engine {
             &record,
         );
 
-        Ok(crate::MutationReceipt::new(
+        let receipt = crate::MutationReceipt::new(
             SemaOperation::Assert,
             *assertion.table().name(),
             key,
             commit_sequence,
             snapshot,
-        ))
+        );
+        drop(_write_guard);
+        self.maintain_versioned_history()?;
+        Ok(receipt)
     }
 
     pub fn mutate<RecordValue>(
@@ -621,13 +649,16 @@ impl Engine {
             &record,
         );
 
-        Ok(crate::MutationReceipt::new(
+        let receipt = crate::MutationReceipt::new(
             SemaOperation::Mutate,
             *mutation.table().name(),
             key,
             commit_sequence,
             snapshot,
-        ))
+        );
+        drop(_write_guard);
+        self.maintain_versioned_history()?;
+        Ok(receipt)
     }
 
     pub fn retract<RecordValue>(
@@ -711,13 +742,16 @@ impl Engine {
             &record,
         );
 
-        Ok(crate::MutationReceipt::new(
+        let receipt = crate::MutationReceipt::new(
             SemaOperation::Retract,
             *retraction.table().name(),
             key,
             commit_sequence,
             snapshot,
-        ))
+        );
+        drop(_write_guard);
+        self.maintain_versioned_history()?;
+        Ok(receipt)
     }
 
     /// Commit a multi-operation write transaction. Renamed from `atomic`
@@ -917,12 +951,15 @@ impl Engine {
             );
         }
 
-        Ok(crate::CommitReceipt::new(
+        let receipt = crate::CommitReceipt::new(
             *request.table().name(),
             commit_sequence,
             snapshot,
             request.operation_count(),
-        ))
+        );
+        drop(_write_guard);
+        self.maintain_versioned_history()?;
+        Ok(receipt)
     }
 
     pub fn match_records<RecordValue>(
@@ -1665,6 +1702,15 @@ impl Engine {
         self.compact_versioned_history(policy.retention(), acknowledgement)
     }
 
+    /// Apply the finite persisted replay policy after a successful normal
+    /// write. A store without durable versioning has no raw history to trim.
+    pub(crate) fn maintain_versioned_history(&self) -> Result<()> {
+        if self.versioning_policy.is_some() {
+            self.compact_configured_versioned_history()?;
+        }
+        Ok(())
+    }
+
     fn validate_history_acknowledgement(
         &self,
         acknowledgement: VersionedHistoryAcknowledgement,
@@ -2031,6 +2077,7 @@ impl Engine {
             }
             CompactionPhase::Checkpointed => {
                 self.compact_configured_versioned_history()?;
+                self.interrupt_compaction_at(CompactionFault::AfterHistoryFloorAdvanced)?;
                 self.storage.write(|transaction| {
                     COMPACTION_INTENT.remove(transaction, COMPACTION_INTENT_KEY)
                 })?;
@@ -2371,6 +2418,7 @@ impl Engine {
                 CompactionFault::AfterPlanPersisted => "plan-persisted",
                 CompactionFault::AfterRetractionsApplied => "retractions-applied",
                 CompactionFault::AfterCheckpointPublished => "checkpoint-published",
+                CompactionFault::AfterHistoryFloorAdvanced => "history-floor-advanced",
             };
             return Err(Error::CompactionInterrupted { phase });
         }
@@ -3430,24 +3478,42 @@ impl Engine {
     where
         RecordValue: EngineStoredValue,
         <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
-            + for<'validation> CheckBytes<Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>>,
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
     {
-        Ok(self.storage.read(|transaction| table.sema_table().get(transaction, key.to_owned_string()))?)
+        Ok(self
+            .storage
+            .read(|transaction| table.sema_table().get(transaction, key.to_owned_string()))?)
     }
 
-    pub(crate) fn atomic_duplicate_assert<RecordValue>(&self, table: &TableReference<RecordValue>, key: &RecordKey) -> Error {
+    pub(crate) fn atomic_duplicate_assert<RecordValue>(
+        &self,
+        table: &TableReference<RecordValue>,
+        key: &RecordKey,
+    ) -> Error {
         self.duplicate_assert_key(table, key)
     }
 
-    pub(crate) fn atomic_missing<RecordValue>(&self, table: &TableReference<RecordValue>, key: &RecordKey) -> Error {
+    pub(crate) fn atomic_missing<RecordValue>(
+        &self,
+        table: &TableReference<RecordValue>,
+        key: &RecordKey,
+    ) -> Error {
         self.record_not_found(table, key)
     }
 
-    pub(crate) fn atomic_payload<RecordValue>(&self, table: TableName, record: &RecordValue) -> Result<VersionedPayload>
+    pub(crate) fn atomic_payload<RecordValue>(
+        &self,
+        table: TableName,
+        record: &RecordValue,
+    ) -> Result<VersionedPayload>
     where
         RecordValue: EngineStoredValue,
         <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
-            + for<'validation> CheckBytes<Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>>,
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
     {
         self.versioned_record_payload(table, record)
     }
@@ -3459,9 +3525,14 @@ impl Engine {
         key: RecordKey,
         payload: VersionedPayload,
     ) -> Result<Option<VersionedLogOperation>> {
-        Ok(self.versioning_policy.as_ref().map(|_| {
-            self.registered_family(&table).map(|family| VersionedLogOperation::new(operation, family, Some(key), payload))
-        }).transpose()?)
+        Ok(self
+            .versioning_policy
+            .as_ref()
+            .map(|_| {
+                self.registered_family(&table)
+                    .map(|family| VersionedLogOperation::new(operation, family, Some(key), payload))
+            })
+            .transpose()?)
     }
 
     pub(crate) fn atomic_announce<RecordValue>(
@@ -3474,9 +3545,12 @@ impl Engine {
     ) where
         RecordValue: EngineStoredValue + Send + Sync + 'static,
         <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
-            + for<'validation> CheckBytes<Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>>,
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
     {
-        self.subscriptions.deliver_delta(kind, table, key, snapshot, record);
+        self.subscriptions
+            .deliver_delta(kind, table, key, snapshot, record);
     }
 
     fn versioned_record_payload<RecordValue>(

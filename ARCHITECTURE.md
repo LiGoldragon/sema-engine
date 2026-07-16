@@ -90,13 +90,18 @@ sections that follow realize it.
   bypass the commit log. Component crates do not depend on `redb`
   directly just to name the read-transaction type
   (`StorageReadTransaction`).
-- `Engine` guards an internal storage layout version (currently 6).
+- `Engine` guards an internal storage layout version (currently 7).
   Layout 2 introduced typed family identity; layout 3 added the mirror
   outbox row beside every versioned entry; layout 4 made `RecordKey`
   carry its domain-key vs identifier kind in the archived log/view
   shape; layout 5 persists the versioned chain-head digest in its own
   slot (plus the commit/versioned log counts) so the write path reads
   the predecessor digest in O(1) instead of scanning the whole log.
+  Layout 6 adds the durable versioning-policy record, binding store name,
+  recovery topology, and finite retention across reopen. Layout 7 adds the
+  durable compaction intent; ordinary open refuses a pending intent and a
+  supervised recovery-open resolves it before the engine can serve reads or
+  writes.
   The layout-4-to-5 bump was additive: it added derived slots without
   touching the data tables or the versioned-log format. So a layout-4
   store that opted into versioning (its versioned log is non-empty)

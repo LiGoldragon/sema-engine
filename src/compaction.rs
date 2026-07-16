@@ -63,4 +63,7 @@ pub enum CompactionFault {
     AfterPlanPersisted,
     AfterRetractionsApplied,
     AfterCheckpointPublished,
+    /// The raw history floor and checkpoint artifacts are durable; only
+    /// intent cleanup remains. Recovery must be idempotent here.
+    AfterHistoryFloorAdvanced,
 }

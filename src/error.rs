@@ -1,7 +1,8 @@
 use thiserror::Error;
 
 use crate::{
-    CheckpointDigest, CommitSequence, EntryDigest, SegmentDigest, StoreSchemaHash, ViewDigest,
+    CheckpointDigest, CommitSequence, CompactionPhase, EntryDigest, SegmentDigest, StoreSchemaHash,
+    ViewDigest,
 };
 
 #[derive(Debug, Error)]
@@ -185,11 +186,18 @@ pub enum Error {
         acknowledgement: &'static str,
     },
 
+    #[error(
+        "versioned store has a durable policy; EngineOpen::with_versioning is required on every reopen"
+    )]
+    VersioningPolicyRequired,
+
     #[error("versioned store policy differs from the durable policy recorded at first open")]
     VersioningPolicyMismatch,
 
-    #[error("versioned store has a durable policy; EngineOpen::with_versioning is required on every reopen")]
-    VersioningPolicyRequired,
+    #[error(
+        "a durable compaction intent is pending in phase {phase:?}; open through Engine::open_recovering"
+    )]
+    CompactionRecoveryRequired { phase: CompactionPhase },
 
     #[error(
         "mirror head fork at sequence {sequence}: outbox recorded {recorded}, \

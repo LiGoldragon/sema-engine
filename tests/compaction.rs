@@ -203,7 +203,11 @@ fn configured_finite_policy_compacts_at_lifecycle_boundary() {
     let compacted = engine
         .compact_configured_versioned_history()
         .expect("configured local retention compacts");
-    assert_eq!(compacted.compacted_entries(), 1);
+    assert_eq!(
+        compacted.compacted_entries(),
+        0,
+        "normal writes already enforce the finite policy"
+    );
     assert!(
         engine.versioned_commit_log().expect("log reads").is_empty(),
         "the finite configured budget is enforced at the lifecycle boundary"
@@ -216,6 +220,7 @@ fn every_durable_compaction_phase_recovers_retraction_heavy_history_after_restar
         CompactionFault::AfterPlanPersisted,
         CompactionFault::AfterRetractionsApplied,
         CompactionFault::AfterCheckpointPublished,
+        CompactionFault::AfterHistoryFloorAdvanced,
     ] {
         let fixture = Fixture::new();
         let mut engine = fixture.open_zero_retention();
@@ -257,7 +262,16 @@ fn every_durable_compaction_phase_recovers_retraction_heavy_history_after_restar
         }
         drop(engine);
 
-        let mut reopened = fixture.open_zero_retention();
+        let mut reopened = Engine::open_recovering(
+            EngineOpen::new(fixture.path(), SchemaVersion::new(1)).with_versioning(
+                VersioningPolicy::new(VersionedStoreName::new("history"))
+                    .with_retention(VersionedHistoryRetention::new(0)),
+            ),
+            &ThoughtDirectory {
+                table: sema_engine::TableReference::new(TableName::new("thoughts")),
+            },
+        )
+        .expect("supervised recovery resolves the intent before serving");
         let table = reopened
             .register_table(fixture.table())
             .expect("table registers after restart");
