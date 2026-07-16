@@ -33,8 +33,9 @@ use crate::{
     KeyedMutation, QueryPlan, QuerySnapshot, RecordIdentifier, ReplayReceipt, Result, Retraction,
     SequenceRange, SnapshotIdentifier, StoreSchemaHash, SubscriptionHandle, SubscriptionIdentifier,
     SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink, TableDescriptor, TableName,
-    TableReference, TableRegistration, VersionedCommitLogEntry, VersionedLogOperation,
-    VersionedPayload, VersionedReplay, VersioningPolicy, WriteOperation,
+    TableReference, TableRegistration, VersionedCommitLogEntry, VersionedHistoryAcknowledgement,
+    VersionedLogOperation, VersionedPayload, VersionedRecoveryTopology, VersionedReplay,
+    VersioningPolicy, WriteOperation,
 };
 
 const CATALOG: sema::Table<&'static str, TableRegistration> =
@@ -58,7 +59,7 @@ const STORAGE_LAYOUT_KEY: &str = "engine_storage_layout";
 /// A's bump was additive over the data tables. A store at an older
 /// layout with no versioned log still hard-fails at open and is rebuilt
 /// through checkpoint import or versioned replay.
-const STORAGE_LAYOUT: u64 = 5;
+const STORAGE_LAYOUT: u64 = 6;
 /// The layout of stores written before the layout slot existed.
 const LAYOUT_BEFORE_SLOT: u64 = 1;
 const SUBSCRIPTIONS: sema::Table<u64, SubscriptionRegistration> =
@@ -69,6 +70,9 @@ const CHECKPOINTS: sema::Table<u64, CheckpointMetadata> =
     sema::Table::new("__sema_engine_checkpoints");
 const CHECKPOINT_SEGMENTS: sema::Table<&'static [u8; 32], CheckpointSegment> =
     sema::Table::new("__sema_engine_checkpoint_segments");
+const VERSIONING_POLICY: sema::Table<&'static str, VersioningPolicy> =
+    sema::Table::new("__sema_engine_versioning_policy");
+const VERSIONING_POLICY_KEY: &str = "configured";
 
 pub struct Engine {
     storage: sema::Sema,
@@ -124,6 +128,7 @@ impl Engine {
         // derived slots from its complete log and re-stamps. Open is
         // single-threaded, so this is the only writer and needs no lock.
         Self::apply_layout_plan(&storage, layout_plan)?;
+        Self::ensure_durable_versioning_policy(&storage, request.versioning_policy())?;
         let catalog = Catalog::new(registrations);
         Ok(Self {
             storage,
@@ -224,7 +229,7 @@ impl Engine {
                 assertion.record(),
             )?;
             CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
-            Self::insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
+            self.insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -302,7 +307,7 @@ impl Engine {
                 .remove(transaction, retraction.identifier().value())?;
             if removed {
                 CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
-                Self::insert_versioned_entry(
+                self.insert_versioned_entry(
                     transaction,
                     &versioned_entry,
                     counts.next_versioned(),
@@ -388,7 +393,7 @@ impl Engine {
                 mutation.record(),
             )?;
             CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
-            Self::insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
+            self.insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -486,7 +491,7 @@ impl Engine {
                 assertion.record(),
             )?;
             CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
-            Self::insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
+            self.insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -591,7 +596,7 @@ impl Engine {
                 mutation.record(),
             )?;
             CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
-            Self::insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
+            self.insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -673,7 +678,7 @@ impl Engine {
                 .remove(transaction, key.to_owned_string())?;
             if removed {
                 CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
-                Self::insert_versioned_entry(
+                self.insert_versioned_entry(
                     transaction,
                     &versioned_entry,
                     counts.next_versioned(),
@@ -884,7 +889,7 @@ impl Engine {
                 }
             }
             CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
-            Self::insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
+            self.insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
             COUNTERS.insert(
                 transaction,
                 LATEST_COMMIT_SEQUENCE_KEY,
@@ -1515,8 +1520,9 @@ impl Engine {
     pub fn compact_versioned_history(
         &self,
         retention: crate::VersionedHistoryRetention,
-        acknowledgement: crate::VersionedHistoryAcknowledgement,
+        acknowledgement: VersionedHistoryAcknowledgement,
     ) -> Result<crate::VersionedHistoryCompaction> {
+        self.validate_history_acknowledgement(acknowledgement)?;
         let retained_before_checkpoint = self.versioned_commit_log()?.len() as u64;
         if retained_before_checkpoint <= retention.maximum_live_entries() {
             return Ok(crate::VersionedHistoryCompaction::new(
@@ -1534,7 +1540,7 @@ impl Engine {
             .latest_checkpoint()?
             .expect("checkpoint just persisted by Engine::checkpoint");
         let covered = checkpoint.metadata().covered().last();
-        if let crate::VersionedHistoryAcknowledgement::Mirror(head) = acknowledgement {
+        if let VersionedHistoryAcknowledgement::Mirror(head) = acknowledgement {
             if head.commit_sequence() < covered {
                 return Err(Error::HistoryCompactionUnacknowledged {
                     required: covered.value(),
@@ -1609,6 +1615,84 @@ impl Engine {
         ))
     }
 
+    /// Run the durable store policy at a lifecycle boundary. Components call
+    /// this after successful writes or from their supervised maintenance tick;
+    /// the normal policy is finite, so raw replay history never relies on a
+    /// disabled or unbounded default.
+    pub fn compact_configured_versioned_history(
+        &self,
+    ) -> Result<crate::VersionedHistoryCompaction> {
+        let policy = self
+            .versioning_policy
+            .as_ref()
+            .ok_or_else(|| Error::versioning_not_enabled("compact_configured_versioned_history"))?;
+        let retained = self.versioned_commit_log()?.len() as u64;
+        if retained <= policy.retention().maximum_live_entries() {
+            return Ok(crate::VersionedHistoryCompaction::new(
+                0,
+                retained,
+                self.latest_checkpoint()?
+                    .map(|checkpoint| checkpoint.metadata().sequence()),
+            ));
+        }
+        let acknowledgement = match policy.recovery_topology() {
+            VersionedRecoveryTopology::LocalCheckpoint => {
+                VersionedHistoryAcknowledgement::LocalCheckpoint
+            }
+            VersionedRecoveryTopology::Mirror => self
+                .mirror_head()?
+                .map(VersionedHistoryAcknowledgement::Mirror)
+                .ok_or(Error::HistoryCompactionUnacknowledged {
+                    required: self.current_commit_sequence()?.value(),
+                    acknowledged: None,
+                })?,
+        };
+        self.compact_versioned_history(policy.retention(), acknowledgement)
+    }
+
+    fn validate_history_acknowledgement(
+        &self,
+        acknowledgement: VersionedHistoryAcknowledgement,
+    ) -> Result<()> {
+        let policy = self
+            .versioning_policy
+            .as_ref()
+            .ok_or_else(|| Error::versioning_not_enabled("compact_versioned_history"))?;
+        match (policy.recovery_topology(), acknowledgement) {
+            (
+                VersionedRecoveryTopology::LocalCheckpoint,
+                VersionedHistoryAcknowledgement::LocalCheckpoint,
+            ) => {
+                if let Some(entry) = self.unshipped_outbox()?.last() {
+                    return Err(Error::HistoryCompactionUnacknowledged {
+                        required: entry.commit_sequence().value(),
+                        acknowledged: self
+                            .mirror_head()?
+                            .map(|head| head.commit_sequence().value()),
+                    });
+                }
+                Ok(())
+            }
+            (VersionedRecoveryTopology::Mirror, VersionedHistoryAcknowledgement::Mirror(_)) => {
+                Ok(())
+            }
+            (
+                VersionedRecoveryTopology::LocalCheckpoint,
+                VersionedHistoryAcknowledgement::Mirror(_),
+            ) => Err(Error::HistoryCompactionTopologyMismatch {
+                topology: "local-checkpoint",
+                acknowledgement: "mirror",
+            }),
+            (
+                VersionedRecoveryTopology::Mirror,
+                VersionedHistoryAcknowledgement::LocalCheckpoint,
+            ) => Err(Error::HistoryCompactionTopologyMismatch {
+                topology: "mirror",
+                acknowledgement: "local-checkpoint",
+            }),
+        }
+    }
+
     /// Rebuild the materialized family tables from the authoritative
     /// versioned log: the fold *is* the definition of the view. Folds
     /// the latest checkpoint's rows (when one exists) plus the log
@@ -1679,6 +1763,7 @@ impl Engine {
             .versioning_policy
             .as_ref()
             .ok_or_else(|| Error::versioning_not_enabled("import"))?;
+        let writes_mirror_outbox = policy.recovery_topology() == VersionedRecoveryTopology::Mirror;
         let metadata = checkpoint.metadata().clone();
         if metadata.store_name() != policy.store_name() {
             return Err(Error::ImportStoreNameMismatch {
@@ -1745,7 +1830,9 @@ impl Engine {
             for (index, entry) in suffix.iter().enumerate() {
                 let count = index as u64 + 1;
                 CommitLog::append_versioned(transaction, entry, count)?;
-                Outbox::record(transaction, entry)?;
+                if writes_mirror_outbox {
+                    Outbox::record(transaction, entry)?;
+                }
                 CommitLog::append_commit(transaction, &CommitLogEntry::from(entry), count)?;
             }
             COUNTERS.insert(
@@ -2028,6 +2115,10 @@ impl Engine {
             }
         }
         let counts = self.log_counts()?;
+        let writes_mirror_outbox = self
+            .versioning_policy
+            .as_ref()
+            .is_some_and(|policy| policy.recovery_topology() == VersionedRecoveryTopology::Mirror);
         self.storage.write(|transaction| {
             let mut commit_count = counts.commits();
             let mut versioned_count = counts.versioned();
@@ -2054,7 +2145,9 @@ impl Engine {
                 versioned_count += 1;
                 CommitLog::append_commit(transaction, &CommitLogEntry::from(entry), commit_count)?;
                 CommitLog::append_versioned(transaction, entry, versioned_count)?;
-                Outbox::record(transaction, entry)?;
+                if writes_mirror_outbox {
+                    Outbox::record(transaction, entry)?;
+                }
             }
             COUNTERS.insert(
                 transaction,
@@ -2887,6 +2980,29 @@ impl Engine {
         }
     }
 
+    /// Bind one finite recovery policy to the store itself. A later daemon
+    /// cannot reinterpret a local-checkpoint store as mirrored (or the
+    /// reverse) merely by changing its process configuration. An old layout-5
+    /// versioned store obtains this row during its validated layout-6 open;
+    /// that migration is additive and never deletes historical rows.
+    fn ensure_durable_versioning_policy(
+        storage: &sema::Sema,
+        requested: Option<&VersioningPolicy>,
+    ) -> Result<()> {
+        let Some(requested) = requested else {
+            return Ok(());
+        };
+        let recorded = storage
+            .read(|transaction| VERSIONING_POLICY.get(transaction, VERSIONING_POLICY_KEY))?;
+        match recorded {
+            Some(recorded) if recorded == *requested => Ok(()),
+            Some(_) => Err(Error::VersioningPolicyMismatch),
+            None => Ok(storage.write(|transaction| {
+                VERSIONING_POLICY.insert(transaction, VERSIONING_POLICY_KEY, requested)
+            })?),
+        }
+    }
+
     fn family_registration_state(&self, identity: &FamilyIdentity) -> Result<FamilyRegistration> {
         if let Some(stored) = self
             .catalog
@@ -3196,13 +3312,18 @@ impl Engine {
     /// log, outbox, and counters commit as one atomic unit. A versioning-
     /// disabled store carries no versioned entry, so this is a no-op.
     fn insert_versioned_entry(
+        &self,
         transaction: &sema::WriteTransaction,
         entry: &Option<VersionedCommitLogEntry>,
         versioned_count: u64,
     ) -> sema::Result<()> {
         if let Some(entry) = entry {
             CommitLog::append_versioned(transaction, entry, versioned_count)?;
-            Outbox::record(transaction, entry)?;
+            if self.versioning_policy.as_ref().is_some_and(|policy| {
+                policy.recovery_topology() == VersionedRecoveryTopology::Mirror
+            }) {
+                Outbox::record(transaction, entry)?;
+            }
         }
         Ok(())
     }

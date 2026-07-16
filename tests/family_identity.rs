@@ -315,7 +315,7 @@ fn pre_family_identity_store_hard_fails_with_typed_layout_error() {
         error,
         sema_engine::Error::StorageLayoutMismatch {
             stored: 1,
-            expected: 5
+            expected: 6
         }
     ));
 }
@@ -348,7 +348,7 @@ fn pre_outbox_layout_store_hard_fails_with_typed_layout_error() {
         error,
         sema_engine::Error::StorageLayoutMismatch {
             stored: 2,
-            expected: 5
+            expected: 6
         }
     ));
 }
@@ -380,7 +380,7 @@ fn string_record_key_layout_store_hard_fails_with_typed_layout_error() {
         error,
         sema_engine::Error::StorageLayoutMismatch {
             stored: 3,
-            expected: 5
+            expected: 6
         }
     ));
 }
@@ -418,7 +418,7 @@ fn layout_four_store_without_versioned_log_hard_fails_with_typed_layout_error() 
         error,
         sema_engine::Error::StorageLayoutMismatch {
             stored: 4,
-            expected: 5
+            expected: 6
         }
     ));
 }

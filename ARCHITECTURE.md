@@ -90,7 +90,7 @@ sections that follow realize it.
   bypass the commit log. Component crates do not depend on `redb`
   directly just to name the read-transaction type
   (`StorageReadTransaction`).
-- `Engine` guards an internal storage layout version (currently 5).
+- `Engine` guards an internal storage layout version (currently 6).
   Layout 2 introduced typed family identity; layout 3 added the mirror
   outbox row beside every versioned entry; layout 4 made `RecordKey`
   carry its domain-key vs identifier kind in the archived log/view
@@ -196,6 +196,7 @@ sections that follow realize it.
   versioned-state log for a component database. The policy names only
   the store; schema identity is never hand-supplied. The default
   `EngineOpen` path does not emit payload-bearing version entries.
+- `VersioningPolicy` persists one finite retention budget and one recovery topology on first open. The default is a conservative 4,096 raw entries; components choose a typed finite override. A local-checkpoint topology creates no mirror outbox rows and may compact only when none exist. A mirror topology writes every outbox row transactionally and rejects local-checkpoint compaction; it compacts only through a durable server acknowledgement. Later opens reject a policy that differs from the persisted topology or budget.
 - The versioned log is stored in the same `.sema` file as table state.
   A successful write inserts the table mutation, the metadata
   `CommitLogEntry`, and the payload-bearing `VersionedCommitLogEntry` in

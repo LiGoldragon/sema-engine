@@ -8,7 +8,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, Engine, EngineOpen, EngineRecord, FamilyName, Mutation, QueryPlan, RecordKey,
     SchemaHash, SchemaVersion, TableDescriptor, TableName, VersionedHistoryAcknowledgement,
-    VersionedHistoryRetention, VersionedStoreName, VersioningPolicy,
+    VersionedHistoryRetention, VersionedRecoveryTopology, VersionedStoreName, VersioningPolicy,
 };
 use tempfile::TempDir;
 
@@ -55,6 +55,26 @@ impl Fixture {
                 .with_versioning(VersioningPolicy::new(VersionedStoreName::new("history"))),
         )
         .expect("versioned engine opens")
+    }
+
+    fn open_mirrored(&self) -> Engine {
+        Engine::open(
+            EngineOpen::new(self.path(), SchemaVersion::new(1)).with_versioning(
+                VersioningPolicy::new(VersionedStoreName::new("history"))
+                    .with_recovery_topology(VersionedRecoveryTopology::Mirror),
+            ),
+        )
+        .expect("mirrored engine opens")
+    }
+
+    fn open_zero_retention(&self) -> Engine {
+        Engine::open(
+            EngineOpen::new(self.path(), SchemaVersion::new(1)).with_versioning(
+                VersioningPolicy::new(VersionedStoreName::new("history"))
+                    .with_retention(VersionedHistoryRetention::new(0)),
+            ),
+        )
+        .expect("zero-retention engine opens")
     }
 
     fn table(&self) -> TableDescriptor<Thought> {
@@ -126,6 +146,67 @@ fn local_checkpoint_compaction_bounds_raw_history_and_preserves_restart_view() {
         .match_records(QueryPlan::all(table))
         .expect("current view queries");
     assert_eq!(snapshot.records(), &[Thought::new("alpha", "newest")]);
+}
+
+#[test]
+fn local_checkpoint_acknowledgement_is_rejected_for_mirrored_store_without_mutation() {
+    let fixture = Fixture::new();
+    let mut engine = fixture.open_mirrored();
+    let table = engine
+        .register_table(fixture.table())
+        .expect("table registers");
+    engine
+        .assert(Assertion::new(table, Thought::new("alpha", "first")))
+        .expect("write queues mirror row");
+
+    let error = engine
+        .compact_versioned_history(
+            VersionedHistoryRetention::new(0),
+            VersionedHistoryAcknowledgement::LocalCheckpoint,
+        )
+        .expect_err("a mirror topology cannot claim local-checkpoint recovery");
+    assert!(matches!(
+        error,
+        sema_engine::Error::HistoryCompactionTopologyMismatch { .. }
+    ));
+    assert_eq!(
+        engine.versioned_commit_log().expect("log reads").len(),
+        1,
+        "rejected compaction leaves replay history intact"
+    );
+    assert_eq!(
+        engine.unshipped_outbox().expect("outbox reads").len(),
+        1,
+        "rejected compaction never deletes unacknowledged mirror replay"
+    );
+    assert!(
+        engine
+            .latest_checkpoint()
+            .expect("checkpoint reads")
+            .is_none(),
+        "topology validation happens before checkpoint mutation"
+    );
+}
+
+#[test]
+fn configured_finite_policy_compacts_at_lifecycle_boundary() {
+    let fixture = Fixture::new();
+    let mut engine = fixture.open_zero_retention();
+    let table = engine
+        .register_table(fixture.table())
+        .expect("table registers");
+    engine
+        .assert(Assertion::new(table, Thought::new("alpha", "first")))
+        .expect("write succeeds");
+
+    let compacted = engine
+        .compact_configured_versioned_history()
+        .expect("configured local retention compacts");
+    assert_eq!(compacted.compacted_entries(), 1);
+    assert!(
+        engine.versioned_commit_log().expect("log reads").is_empty(),
+        "the finite configured budget is enforced at the lifecycle boundary"
+    );
 }
 
 struct ThoughtDirectory {

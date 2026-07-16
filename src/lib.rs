@@ -78,6 +78,6 @@ pub use table::{
 pub use versioning::{
     EntryDigest, FamilyIdentity, FamilyName, ReplayReceipt, SchemaHash, StoreSchemaHash,
     VersionedCommitLogEntry, VersionedHistoryAcknowledgement, VersionedHistoryCompaction,
-    VersionedHistoryRetention, VersionedLogOperation, VersionedPayload, VersionedReplay,
-    VersionedStoreName, VersioningPolicy,
+    VersionedHistoryRetention, VersionedLogOperation, VersionedPayload, VersionedRecoveryTopology,
+    VersionedReplay, VersionedStoreName, VersioningPolicy,
 };

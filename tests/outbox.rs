@@ -20,8 +20,8 @@ use sema_engine::{
     Assertion, CommitRequest, CommitSequence, Durability, Engine, EngineOpen, EngineRecord,
     EntryDigest, FamilyName, IdentifiedAssertion, IdentifiedMutation, IdentifiedRetraction,
     IdentifiedTableDescriptor, MirrorAcknowledgement, MirrorHead, Mutation, QueryPlan, RecordKey,
-    Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, VersionedStoreName,
-    VersioningPolicy,
+    Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, VersionedRecoveryTopology,
+    VersionedStoreName, VersioningPolicy,
 };
 use tempfile::TempDir;
 
@@ -76,8 +76,10 @@ impl Fixture {
 
     fn open_versioned(&self, name: &str) -> Engine {
         Engine::open(
-            EngineOpen::new(self.database_path(name), SchemaVersion::new(1))
-                .with_versioning(VersioningPolicy::new(VersionedStoreName::new(name))),
+            EngineOpen::new(self.database_path(name), SchemaVersion::new(1)).with_versioning(
+                VersioningPolicy::new(VersionedStoreName::new(name))
+                    .with_recovery_topology(VersionedRecoveryTopology::Mirror),
+            ),
         )
         .expect("versioned engine opens")
     }

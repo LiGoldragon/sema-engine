@@ -175,6 +175,17 @@ pub enum Error {
     },
 
     #[error(
+        "version-history acknowledgement {acknowledgement} conflicts with the configured {topology} recovery topology"
+    )]
+    HistoryCompactionTopologyMismatch {
+        topology: &'static str,
+        acknowledgement: &'static str,
+    },
+
+    #[error("versioned store policy differs from the durable policy recorded at first open")]
+    VersioningPolicyMismatch,
+
+    #[error(
         "mirror head fork at sequence {sequence}: outbox recorded {recorded}, \
          acknowledgement names {acknowledged}"
     )]

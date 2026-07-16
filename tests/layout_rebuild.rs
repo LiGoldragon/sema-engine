@@ -38,7 +38,7 @@ const LATEST_ENTRY_DIGEST_KEY: &str = "latest_entry_digest";
 const COMMIT_LOG_COUNT_KEY: &str = "commit_log_count";
 const VERSIONED_LOG_COUNT_KEY: &str = "versioned_log_count";
 const LAYOUT_FOUR: u64 = 4;
-const LAYOUT_FIVE: u64 = 5;
+const CURRENT_LAYOUT: u64 = 6;
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 #[rkyv(derive(Debug))]
@@ -294,7 +294,11 @@ fn layout_four_store_with_versioned_log_rebuilds_derived_slots_on_open() {
     let stamped = kernel
         .read(|transaction| COUNTERS.get(transaction, STORAGE_LAYOUT_KEY))
         .expect("layout slot reads");
-    assert_eq!(stamped, Some(LAYOUT_FIVE), "layout re-stamped to current");
+    assert_eq!(
+        stamped,
+        Some(CURRENT_LAYOUT),
+        "layout re-stamped to current"
+    );
 }
 
 /// A store at an older layout with NO versioned log still hard-fails
@@ -330,7 +334,7 @@ fn old_layout_store_without_versioned_log_still_hard_fails_typed() {
             error,
             sema_engine::Error::StorageLayoutMismatch {
                 stored: 4,
-                expected: 5,
+                expected: 6,
             }
         ),
         "got {error:?}",

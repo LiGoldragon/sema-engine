@@ -4,38 +4,83 @@ use signal_sema::SemaOperation;
 
 use crate::{Catalog, CommitSequence, RecordKey, SnapshotIdentifier, TableName, TableReference};
 
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct VersioningPolicy {
-    store_name: VersionedStoreName,
+/// The only recovery topologies a versioned store may select. The choice is
+/// persisted by the engine on first open and cannot silently change on a later
+/// process invocation: a local checkpoint is a recovery artifact only when no
+/// mirror replay queue exists; a mirrored store keeps the durable outbox until
+/// the server-confirmed head acknowledges it.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionedRecoveryTopology {
+    LocalCheckpoint,
+    Mirror,
 }
 
-impl VersioningPolicy {
-    pub fn new(store_name: VersionedStoreName) -> Self {
-        Self { store_name }
-    }
-
-    pub fn store_name(&self) -> &VersionedStoreName {
-        &self.store_name
-    }
-}
-
-/// The raw-versioned-entry budget a component elects before it requests
-/// compaction. A checkpoint preserves the current typed view while compacting
-/// entries beyond this budget; it is not an unacknowledged mirror substitute.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The raw-versioned-entry budget a component elects before lifecycle
+/// compaction. It is deliberately finite: `VersioningPolicy::new` uses the
+/// conservative default of 4,096 entries, and components may select another
+/// finite count through their typed startup configuration.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VersionedHistoryRetention {
     maximum_live_entries: u64,
 }
 
 impl VersionedHistoryRetention {
+    pub const DEFAULT_MAXIMUM_LIVE_ENTRIES: u64 = 4_096;
+
     pub const fn new(maximum_live_entries: u64) -> Self {
         Self {
             maximum_live_entries,
         }
     }
 
+    pub const fn conservative_default() -> Self {
+        Self::new(Self::DEFAULT_MAXIMUM_LIVE_ENTRIES)
+    }
+
     pub const fn maximum_live_entries(&self) -> u64 {
         self.maximum_live_entries
+    }
+}
+
+/// Versioned-store configuration. This is one typed finite policy instead of
+/// optional caller-side compaction knobs: it names the store, its recovery
+/// topology, and its bounded raw-history window.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct VersioningPolicy {
+    store_name: VersionedStoreName,
+    recovery_topology: VersionedRecoveryTopology,
+    retention: VersionedHistoryRetention,
+}
+
+impl VersioningPolicy {
+    pub fn new(store_name: VersionedStoreName) -> Self {
+        Self {
+            store_name,
+            recovery_topology: VersionedRecoveryTopology::LocalCheckpoint,
+            retention: VersionedHistoryRetention::conservative_default(),
+        }
+    }
+
+    pub fn with_recovery_topology(mut self, recovery_topology: VersionedRecoveryTopology) -> Self {
+        self.recovery_topology = recovery_topology;
+        self
+    }
+
+    pub fn with_retention(mut self, retention: VersionedHistoryRetention) -> Self {
+        self.retention = retention;
+        self
+    }
+
+    pub fn store_name(&self) -> &VersionedStoreName {
+        &self.store_name
+    }
+
+    pub const fn recovery_topology(&self) -> VersionedRecoveryTopology {
+        self.recovery_topology
+    }
+
+    pub const fn retention(&self) -> VersionedHistoryRetention {
+        self.retention
     }
 }
 
