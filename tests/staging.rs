@@ -105,10 +105,6 @@ impl Fixture {
         .expect("versioned engine opens")
     }
 
-    fn open_versioned(&self, name: &str) -> Engine {
-        self.open_versioned_as(name, name)
-    }
-
     fn thought_descriptor(&self) -> TableDescriptor<Thought> {
         TableDescriptor::new(
             TableName::new("thoughts"),

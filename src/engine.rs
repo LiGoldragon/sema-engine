@@ -2499,8 +2499,7 @@ impl Engine {
         let key = retraction.key().clone();
         let table_name = retraction.table().name().as_str();
         let pre_image = self.staged_pre_image(session, table_name, &key, || {
-            Ok(self
-                .storage
+            self.storage
                 .read(|transaction| {
                     retraction
                         .table()
@@ -2510,7 +2509,7 @@ impl Engine {
                 .map(|record: RecordValue| {
                     self.versioned_record_payload(*retraction.table().name(), &record)
                 })
-                .transpose()?)
+                .transpose()
         })?;
         let Some(pre_image) = pre_image else {
             return Err(self.record_not_found(retraction.table(), &key));
@@ -2620,8 +2619,7 @@ impl Engine {
         let key = crate::RecordKey::identifier(retraction.identifier());
         let table_name = retraction.table().name().as_str();
         let pre_image = self.staged_pre_image(session, table_name, &key, || {
-            Ok(self
-                .storage
+            self.storage
                 .read(|transaction| {
                     retraction
                         .table()
@@ -2631,7 +2629,7 @@ impl Engine {
                 .map(|record: RecordValue| {
                     self.versioned_record_payload(*retraction.table().name(), &record)
                 })
-                .transpose()?)
+                .transpose()
         })?;
         let Some(pre_image) = pre_image else {
             return Err(
@@ -2718,8 +2716,7 @@ impl Engine {
                         return Err(self.duplicate_write_key(request.table(), key));
                     }
                     let pre_image = self.staged_pre_image(session, table_name, key, || {
-                        Ok(self
-                            .storage
+                        self.storage
                             .read(|transaction| {
                                 request
                                     .table()
@@ -2729,7 +2726,7 @@ impl Engine {
                             .map(|record: RecordValue| {
                                 self.versioned_record_payload(*request.table().name(), &record)
                             })
-                            .transpose()?)
+                            .transpose()
                     })?;
                     let Some(pre_image) = pre_image else {
                         return Err(self.record_not_found(request.table(), key));
