@@ -10,6 +10,7 @@
 //! view folded from it. Every durable write goes through the engine's
 //! logged choke points — the storage kernel hands out read access only.
 
+pub mod atomic;
 pub mod catalog;
 pub mod checkpoint;
 pub mod commit_log;
@@ -30,6 +31,7 @@ pub mod subscribe;
 pub mod table;
 pub mod versioning;
 
+pub use atomic::{AtomicCommit, AtomicCommitReceipt};
 pub use catalog::{Catalog, TableRegistration};
 pub use checkpoint::{
     Checkpoint, CheckpointDigest, CheckpointMetadata, CheckpointReceipt, CheckpointSegment,

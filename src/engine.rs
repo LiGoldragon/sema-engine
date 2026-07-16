@@ -31,7 +31,7 @@ use crate::{
     FamilyIdentity, IdentifiedAssertion, IdentifiedMutation, IdentifiedMutationReceipt,
     IdentifiedQueryPlan, IdentifiedQuerySnapshot, IdentifiedRecord, IdentifiedRetraction,
     IdentifiedTableDescriptor, IdentifiedTableReference, InitialSnapshot, KeyedAssertion,
-    KeyedMutation, QueryPlan, QuerySnapshot, RecordIdentifier, ReplayReceipt, Result, Retraction,
+    KeyedMutation, QueryPlan, QuerySnapshot, RecordIdentifier, RecordKey, ReplayReceipt, Result, Retraction,
     SequenceRange, SnapshotIdentifier, StoreSchemaHash, SubscriptionHandle, SubscriptionIdentifier,
     SubscriptionReceipt, SubscriptionRegistration, SubscriptionSink, TableDescriptor, TableName,
     TableReference, TableRegistration, VersionedCommitLogEntry, VersionedHistoryAcknowledgement,
@@ -41,9 +41,9 @@ use crate::{
 
 const CATALOG: sema::Table<&'static str, TableRegistration> =
     sema::Table::new("__sema_engine_catalog");
-const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
-const LATEST_COMMIT_SEQUENCE_KEY: &str = "latest_commit_sequence";
-const LATEST_SNAPSHOT_KEY: &str = "latest_snapshot";
+pub(crate) const COUNTERS: sema::Table<&'static str, u64> = sema::Table::new("__sema_engine_counters");
+pub(crate) const LATEST_COMMIT_SEQUENCE_KEY: &str = "latest_commit_sequence";
+pub(crate) const LATEST_SNAPSHOT_KEY: &str = "latest_snapshot";
 const NEXT_SUBSCRIPTION_KEY: &str = "next_subscription";
 const LATEST_CHECKPOINT_KEY: &str = "latest_checkpoint";
 const STORAGE_LAYOUT_KEY: &str = "engine_storage_layout";
@@ -79,10 +79,10 @@ const COMPACTION_INTENT: sema::Table<&'static str, CompactionIntent> =
 const COMPACTION_INTENT_KEY: &str = "pending";
 
 pub struct Engine {
-    storage: sema::Sema,
+    pub(crate) storage: sema::Sema,
     catalog: Catalog,
     subscriptions: SubscriptionRegistry,
-    versioning_policy: Option<VersioningPolicy>,
+    pub(crate) versioning_policy: Option<VersioningPolicy>,
     /// Serializes the engine's own read-compute-write path so two
     /// `&self` callers cannot each read the same chain head, commit
     /// sequence, or duplicate-key state and race their writes. Held
@@ -3139,15 +3139,14 @@ impl Engine {
         storage: &sema::Sema,
         requested: Option<&VersioningPolicy>,
     ) -> Result<()> {
-        let Some(requested) = requested else {
-            return Ok(());
-        };
         let recorded = storage
             .read(|transaction| VERSIONING_POLICY.get(transaction, VERSIONING_POLICY_KEY))?;
-        match recorded {
-            Some(recorded) if recorded == *requested => Ok(()),
-            Some(_) => Err(Error::VersioningPolicyMismatch),
-            None => Ok(storage.write(|transaction| {
+        match (recorded, requested) {
+            (Some(_), None) => Err(Error::VersioningPolicyRequired),
+            (Some(recorded), Some(requested)) if recorded == *requested => Ok(()),
+            (Some(_), Some(_)) => Err(Error::VersioningPolicyMismatch),
+            (None, None) => Ok(()),
+            (None, Some(requested)) => Ok(storage.write(|transaction| {
                 VERSIONING_POLICY.insert(transaction, VERSIONING_POLICY_KEY, requested)
             })?),
         }
@@ -3200,17 +3199,17 @@ impl Engine {
     /// writer panics mid-mutation — an unrecoverable state in which the
     /// redb transaction has already rolled back — so propagating the
     /// poison through `expect` is correct.
-    fn write_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+    pub(crate) fn write_guard(&self) -> std::sync::MutexGuard<'_, ()> {
         self.write_lock
             .lock()
             .expect("engine write lock poisoned by a panicking writer")
     }
 
-    fn next_snapshot(&self) -> Result<SnapshotIdentifier> {
+    pub(crate) fn next_snapshot(&self) -> Result<SnapshotIdentifier> {
         Ok(self.committed_snapshot()?.next())
     }
 
-    fn next_commit_sequence(&self) -> Result<crate::CommitSequence> {
+    pub(crate) fn next_commit_sequence(&self) -> Result<crate::CommitSequence> {
         Ok(self.committed_commit_sequence()?.next())
     }
 
@@ -3397,7 +3396,7 @@ impl Engine {
         )
     }
 
-    fn versioned_entry(
+    pub(crate) fn versioned_entry(
         &self,
         commit_sequence: crate::CommitSequence,
         snapshot: SnapshotIdentifier,
@@ -3414,6 +3413,70 @@ impl Engine {
             self.latest_versioned_entry_digest()?,
             operations,
         )))
+    }
+
+    pub(crate) fn ensure_atomic_registered<RecordValue>(
+        &self,
+        table: &TableReference<RecordValue>,
+    ) -> Result<()> {
+        self.ensure_registered(table)
+    }
+
+    pub(crate) fn atomic_read<RecordValue>(
+        &self,
+        table: &TableReference<RecordValue>,
+        key: &RecordKey,
+    ) -> Result<Option<RecordValue>>
+    where
+        RecordValue: EngineStoredValue,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>>,
+    {
+        Ok(self.storage.read(|transaction| table.sema_table().get(transaction, key.to_owned_string()))?)
+    }
+
+    pub(crate) fn atomic_duplicate_assert<RecordValue>(&self, table: &TableReference<RecordValue>, key: &RecordKey) -> Error {
+        self.duplicate_assert_key(table, key)
+    }
+
+    pub(crate) fn atomic_missing<RecordValue>(&self, table: &TableReference<RecordValue>, key: &RecordKey) -> Error {
+        self.record_not_found(table, key)
+    }
+
+    pub(crate) fn atomic_payload<RecordValue>(&self, table: TableName, record: &RecordValue) -> Result<VersionedPayload>
+    where
+        RecordValue: EngineStoredValue,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>>,
+    {
+        self.versioned_record_payload(table, record)
+    }
+
+    pub(crate) fn atomic_versioned_operation(
+        &self,
+        operation: SemaOperation,
+        table: TableName,
+        key: RecordKey,
+        payload: VersionedPayload,
+    ) -> Result<Option<VersionedLogOperation>> {
+        Ok(self.versioning_policy.as_ref().map(|_| {
+            self.registered_family(&table).map(|family| VersionedLogOperation::new(operation, family, Some(key), payload))
+        }).transpose()?)
+    }
+
+    pub(crate) fn atomic_announce<RecordValue>(
+        &self,
+        kind: DeltaKind,
+        table: TableName,
+        key: &RecordKey,
+        snapshot: SnapshotIdentifier,
+        record: &RecordValue,
+    ) where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>>,
+    {
+        self.subscriptions.deliver_delta(kind, table, key, snapshot, record);
     }
 
     fn versioned_record_payload<RecordValue>(
@@ -3451,7 +3514,7 @@ impl Engine {
     /// the next commit sequence, then writes the incremented counts
     /// inside the same transaction as the rows — keeping the counts
     /// exact without ever materializing either log.
-    fn log_counts(&self) -> Result<LogCounts> {
+    pub(crate) fn log_counts(&self) -> Result<LogCounts> {
         self.log_plane().counts()
     }
 
@@ -3461,7 +3524,7 @@ impl Engine {
     /// inside the one write transaction the engine opened — so data,
     /// log, outbox, and counters commit as one atomic unit. A versioning-
     /// disabled store carries no versioned entry, so this is a no-op.
-    fn insert_versioned_entry(
+    pub(crate) fn insert_versioned_entry(
         &self,
         transaction: &sema::WriteTransaction,
         entry: &Option<VersionedCommitLogEntry>,

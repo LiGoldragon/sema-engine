@@ -42,6 +42,9 @@ pub enum Error {
     #[error("commit request is empty: {table}")]
     EmptyCommit { table: String },
 
+    #[error("atomic commit is empty")]
+    EmptyAtomicCommit,
+
     #[error("commit request contains duplicate key: {table}/{key}")]
     DuplicateWriteKey { table: String, key: String },
 
@@ -184,6 +187,9 @@ pub enum Error {
 
     #[error("versioned store policy differs from the durable policy recorded at first open")]
     VersioningPolicyMismatch,
+
+    #[error("versioned store has a durable policy; EngineOpen::with_versioning is required on every reopen")]
+    VersioningPolicyRequired,
 
     #[error(
         "mirror head fork at sequence {sequence}: outbox recorded {recorded}, \
