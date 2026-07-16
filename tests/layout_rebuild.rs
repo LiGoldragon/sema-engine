@@ -38,7 +38,7 @@ const LATEST_ENTRY_DIGEST_KEY: &str = "latest_entry_digest";
 const COMMIT_LOG_COUNT_KEY: &str = "commit_log_count";
 const VERSIONED_LOG_COUNT_KEY: &str = "versioned_log_count";
 const LAYOUT_FOUR: u64 = 4;
-const CURRENT_LAYOUT: u64 = 6;
+const CURRENT_LAYOUT: u64 = 7;
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 #[rkyv(derive(Debug))]
@@ -334,7 +334,7 @@ fn old_layout_store_without_versioned_log_still_hard_fails_typed() {
             error,
             sema_engine::Error::StorageLayoutMismatch {
                 stored: 4,
-                expected: 6,
+                expected: 7,
             }
         ),
         "got {error:?}",

@@ -19,8 +19,8 @@ use sema_engine::{
     Assertion, Checkpoint, CheckpointMetadata, CheckpointSegment, Engine, EngineOpen, EngineRecord,
     FamilyDirectory, FamilyName, MirrorHead, OutboxEntry, RecordKey, RowMaterializer, SchemaHash,
     SchemaVersion, SegmentDigest, TableDescriptor, TableName, TableReference,
-    VersionedCommitLogEntry, VersionedLogOperation, VersionedPayload, VersionedStoreName,
-    VersioningPolicy, ViewRow,
+    VersionedCommitLogEntry, VersionedLogOperation, VersionedPayload, VersionedRecoveryTopology,
+    VersionedStoreName, VersioningPolicy, ViewRow,
 };
 use signal_frame::NonEmpty;
 use signal_sema::SemaOperation;
@@ -148,6 +148,16 @@ impl Fixture {
 
     fn open_versioned(&self, name: &str) -> Engine {
         self.open_store(name, name)
+    }
+
+    fn open_mirrored(&self, name: &str) -> Engine {
+        Engine::open(
+            EngineOpen::new(self.database_path(name), SchemaVersion::new(1)).with_versioning(
+                VersioningPolicy::new(VersionedStoreName::new(name))
+                    .with_recovery_topology(VersionedRecoveryTopology::Mirror),
+            ),
+        )
+        .expect("mirrored engine opens")
     }
 
     fn open_store(&self, file: &str, store_name: &str) -> Engine {
@@ -619,7 +629,17 @@ fn import_rejects_a_schema_hash_that_does_not_re_derive_from_the_inventory() {
 fn acknowledging_a_head_over_a_rewritten_log_is_a_typed_mismatch() {
     let fixture = Fixture::new();
     let (genuine, head) = {
-        let mut engine = fixture.open_versioned("outbox-mismatch");
+        let mut engine = Engine::open(
+            EngineOpen::new(
+                fixture.database_path("outbox-mismatch"),
+                SchemaVersion::new(1),
+            )
+            .with_versioning(
+                VersioningPolicy::new(VersionedStoreName::new("outbox-mismatch"))
+                    .with_recovery_topology(VersionedRecoveryTopology::Mirror),
+            ),
+        )
+        .expect("mirrored engine opens");
         let thoughts = engine
             .register_table(fixture.descriptor())
             .expect("table registers");
@@ -643,7 +663,7 @@ fn acknowledging_a_head_over_a_rewritten_log_is_a_typed_mismatch() {
 
     // An honest mirror echoing the recorded outbox head is refused:
     // the row no longer matches the logged entry at that sequence.
-    let engine = fixture.open_versioned("outbox-mismatch");
+    let engine = fixture.open_mirrored("outbox-mismatch");
     let error = engine
         .acknowledge_mirror(head)
         .expect_err("mismatched outbox row is typed");
