@@ -76,8 +76,8 @@ pub use subscribe::{
     SubscriptionSink,
 };
 pub use table::{
-    IdentifiedRecord, IdentifiedTableDescriptor, IdentifiedTableReference, TableDescriptor,
-    TableName, TableReference,
+    EvolutionStep, IdentifiedRecord, IdentifiedTableDescriptor, IdentifiedTableReference,
+    TableDescriptor, TableName, TableReference,
 };
 pub use versioning::{
     EntryDigest, FamilyIdentity, FamilyName, ReplayReceipt, SchemaHash, StoreSchemaHash,

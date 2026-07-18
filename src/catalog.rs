@@ -33,6 +33,23 @@ impl Catalog {
             .find(|registration| registration.identity().shares_family(identity))
     }
 
+    /// Replace the registration bound at a table coordinate with an
+    /// evolved family identity. This is the in-memory half of a family
+    /// evolution; the engine lands the durable half — the catalog row,
+    /// the rewritten rows, and the log entries — in one write
+    /// transaction.
+    pub fn evolve(&mut self, table_name: &str, registration: TableRegistration) -> Result<()> {
+        let slot = self
+            .registrations
+            .iter_mut()
+            .find(|existing| existing.table_name() == table_name)
+            .ok_or_else(|| Error::TableNotRegistered {
+                table: table_name.to_owned(),
+            })?;
+        *slot = registration;
+        Ok(())
+    }
+
     pub fn insert(&mut self, registration: TableRegistration) -> Result<()> {
         if self
             .registration_for_table(registration.table_name())

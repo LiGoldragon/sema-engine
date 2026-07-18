@@ -28,7 +28,7 @@ use crate::staging::{
 use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
     Catalog, CommitRequest, DeltaKind, EngineStoredRecord, EngineStoredValue, Error,
-    FamilyIdentity, IdentifiedAssertion, IdentifiedMutation, IdentifiedMutationReceipt,
+    EvolutionStep, FamilyIdentity, IdentifiedAssertion, IdentifiedMutation, IdentifiedMutationReceipt,
     IdentifiedQueryPlan, IdentifiedQuerySnapshot, IdentifiedRecord, IdentifiedRetraction,
     IdentifiedTableDescriptor, IdentifiedTableReference, InitialSnapshot, KeyedAssertion,
     KeyedMutation, QueryPlan, QuerySnapshot, RecordIdentifier, RecordKey, ReplayReceipt, Result,
@@ -176,18 +176,183 @@ impl Engine {
     pub fn register_table<RecordValue>(
         &mut self,
         descriptor: TableDescriptor<RecordValue>,
-    ) -> Result<TableReference<RecordValue>> {
+    ) -> Result<TableReference<RecordValue>>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
         let name = *descriptor.name();
-        match self.family_registration_state(&descriptor.family_identity())? {
-            FamilyRegistration::Existing => {}
-            FamilyRegistration::New(registration) => {
+        match self.family_registration_state(&descriptor.family_identity()) {
+            Ok(FamilyRegistration::Existing) => {}
+            Ok(FamilyRegistration::New(registration)) => {
                 self.storage.write(|transaction| {
                     CATALOG.insert(transaction, name.as_str(), &registration)
                 })?;
                 self.catalog.insert(registration)?;
             }
+            Err(mismatch @ Error::FamilyIdentityMismatch { .. }) => {
+                // The catalog names a different identity at this table.
+                // A declared prior generation of the same family evolves
+                // in place; anything else keeps failing closed with the
+                // original mismatch.
+                let stored = self.registered_family(&name)?;
+                let Some(step) = descriptor.evolution_step_for(&stored).cloned() else {
+                    return Err(mismatch);
+                };
+                self.evolve_registered_family(&descriptor, stored, &step)?;
+            }
+            Err(other) => return Err(other),
         }
         Ok(TableReference::new(name))
+    }
+
+    /// Migrate a registered family in place across a schema-identity
+    /// bump: read every row in its stored prior shape through the
+    /// declared evolution step, then land the rewritten rows, the
+    /// evolved catalog registration, and the log entries in one write
+    /// transaction — the catalog can never name a shape the rows do
+    /// not have.
+    ///
+    /// The versioned log records the evolution as row history: one
+    /// entry retracting each row under the prior family identity and
+    /// asserting its converted successor under the evolved identity,
+    /// so a canonical-view fold or rebuild materializes only
+    /// current-shape rows and never needs the retired shape. An empty
+    /// family evolves as a catalog-only rewrite — there are no rows to
+    /// carry and nothing material to log, matching plain registration,
+    /// which also writes no log entry.
+    ///
+    /// Registration happens at daemon startup, before any subscription
+    /// can exist, so no deltas are delivered for the carried rows.
+    fn evolve_registered_family<RecordValue>(
+        &mut self,
+        descriptor: &TableDescriptor<RecordValue>,
+        stored: FamilyIdentity,
+        step: &EvolutionStep<RecordValue>,
+    ) -> Result<()>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let name = *descriptor.name();
+        let carried = self
+            .storage
+            .read(|transaction| step.carry_rows(transaction, name))?;
+        // The in-memory catalog evolves first so the store schema hash
+        // stamped into the versioned entry names the evolved inventory;
+        // a failed persist restores it, keeping memory equal to disk.
+        let previous = TableRegistration::new(stored.clone());
+        let evolved = TableRegistration::new(descriptor.family_identity());
+        self.catalog.evolve(name.as_str(), evolved.clone())?;
+        let persisted = self.persist_family_evolution(descriptor, &stored, &carried, &evolved);
+        if persisted.is_err() {
+            self.catalog.evolve(name.as_str(), previous)?;
+        }
+        persisted
+    }
+
+    fn persist_family_evolution<RecordValue>(
+        &self,
+        descriptor: &TableDescriptor<RecordValue>,
+        stored: &FamilyIdentity,
+        carried: &[(String, RecordValue)],
+        evolved: &TableRegistration,
+    ) -> Result<()>
+    where
+        RecordValue: EngineStoredValue + Send + Sync + 'static,
+        <RecordValue as rkyv::Archive>::Archived: rkyv::Deserialize<RecordValue, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >,
+    {
+        let name = *descriptor.name();
+        if carried.is_empty() {
+            return Ok(self.storage.write(|transaction| {
+                CATALOG.insert(transaction, name.as_str(), evolved)
+            })?);
+        }
+        let evolved_identity = evolved.identity().clone();
+        let mut log_operations = Vec::with_capacity(carried.len() * 2);
+        let mut versioned_operations = Vec::with_capacity(carried.len() * 2);
+        for (key, _row) in carried {
+            let record_key = crate::RecordKey::new(key.clone());
+            log_operations.push(CommitLogOperation::new(
+                SemaOperation::Retract,
+                name,
+                Some(record_key.clone()),
+            ));
+            if self.versioning_policy.is_some() {
+                versioned_operations.push(VersionedLogOperation::new(
+                    SemaOperation::Retract,
+                    stored.clone(),
+                    Some(record_key),
+                    VersionedPayload::tombstone(),
+                ));
+            }
+        }
+        for (key, row) in carried {
+            let record_key = crate::RecordKey::new(key.clone());
+            log_operations.push(CommitLogOperation::new(
+                SemaOperation::Assert,
+                name,
+                Some(record_key.clone()),
+            ));
+            if self.versioning_policy.is_some() {
+                versioned_operations.push(VersionedLogOperation::new(
+                    SemaOperation::Assert,
+                    evolved_identity.clone(),
+                    Some(record_key),
+                    self.versioned_record_payload(name, row)?,
+                ));
+            }
+        }
+        let commit_sequence = self.next_commit_sequence()?;
+        let snapshot = self.next_snapshot()?;
+        let entry = CommitLogEntry::new(
+            commit_sequence,
+            snapshot,
+            NonEmpty::try_from_vec(log_operations).map_err(|_| Error::EmptyCommit {
+                table: name.as_str().to_owned(),
+            })?,
+        );
+        let versioned_entry = if self.versioning_policy.is_some() {
+            self.versioned_entry(
+                commit_sequence,
+                snapshot,
+                NonEmpty::try_from_vec(versioned_operations).map_err(|_| Error::EmptyCommit {
+                    table: name.as_str().to_owned(),
+                })?,
+            )?
+        } else {
+            None
+        };
+        let counts = self.log_counts()?;
+        self.storage.write(|transaction| {
+            for (key, row) in carried {
+                sema::Table::<String, RecordValue>::new(name.as_str()).insert(
+                    transaction,
+                    key.clone(),
+                    row,
+                )?;
+            }
+            CommitLog::append_commit(transaction, &entry, counts.next_commit())?;
+            self.insert_versioned_entry(transaction, &versioned_entry, counts.next_versioned())?;
+            COUNTERS.insert(
+                transaction,
+                LATEST_COMMIT_SEQUENCE_KEY,
+                &commit_sequence.value(),
+            )?;
+            COUNTERS.insert(transaction, LATEST_SNAPSHOT_KEY, &snapshot.value())?;
+            CATALOG.insert(transaction, name.as_str(), evolved)?;
+            Ok(())
+        })?;
+        self.maintain_versioned_history()
     }
 
     pub fn register_identified_table<RecordValue>(

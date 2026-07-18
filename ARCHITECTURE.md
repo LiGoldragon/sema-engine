@@ -426,6 +426,43 @@ engine.retract_identified(IdentifiedRetraction::new(entries, identifier))?;
 The numeric identifier and the `CommitSequence` are both engine state.
 Component daemons do not keep a parallel ledger.
 
+## Family evolution — read-older-shapes chain at registration
+
+A table descriptor may declare its family's evolution: the prior
+stored generations the engine may find in an existing store's catalog,
+each as a per-family schema hash plus a typed carry that reads rows in
+that generation's own decoded shape and converts them forward to the
+current record type (`TableDescriptor::with_prior`). Registration
+against a store whose catalog names a declared prior migrates the
+family in place inside the engine; consumers no longer reach into
+`__sema_engine_catalog` or hand-write migration transactions.
+
+- **Atomic**: the rewritten rows, the evolved catalog registration,
+  and the log entries land in one write transaction — the catalog can
+  never name a shape the rows do not have. A failed carry (including a
+  validated decode refusal of mismatched bytes) leaves the store
+  untouched.
+- **Fail-closed**: a stored identity with no declared step — or from a
+  different family reusing the table coordinate — keeps surfacing the
+  original typed `FamilyIdentityMismatch`. Nothing is guessed.
+- **Logged as row history**: on a versioned store, the evolution entry
+  retracts each row under the prior family identity and asserts its
+  converted successor under the evolved identity, so canonical-view
+  folds and rebuilds materialize only current-shape rows and never
+  need the retired shape. The entry's commit sequence is the durable
+  age evidence of the migration. An empty family evolves as a
+  catalog-only rewrite and logs nothing, matching plain registration.
+- **Direct steps, not chained hops**: each declared generation carries
+  its own conversion to the current shape. A store parked two
+  generations back converts in one step through its own declaration.
+- **Domain-keyed families only, today**: `IdentifiedTableDescriptor`
+  has no evolution surface yet; identified families keep their
+  existing restore paths (checkpoint import, rebuild-from-log). The
+  storage-kernel schema-version stamp (`__sema_meta`) is a separate,
+  kernel-owned concern: additive version stamping still lives with
+  consumers and is not yet atomic with family registration — the
+  recorded debt stands.
+
 ## Checkpoint — payload-bearing derived artifact
 
 A checkpoint *digest* verifies a state; a checkpoint *segment*
