@@ -201,7 +201,7 @@ sections that follow realize it.
   versioned-state log for a component database. The policy names only
   the store; schema identity is never hand-supplied. The default
   `EngineOpen` path does not emit payload-bearing version entries.
-- `VersioningPolicy` persists one finite retention budget and one recovery topology on first open. The default is a conservative 4,096 raw entries; components choose a typed finite override. A local-checkpoint topology creates no mirror outbox rows and may compact only when none exist. A mirror topology writes every outbox row transactionally and rejects local-checkpoint compaction; it compacts only through a durable server acknowledgement. Later opens reject a policy that differs from the persisted topology or budget.
+- `VersioningPolicy` persists one finite retention budget and one recovery topology on first open. The default is a conservative 4,096 raw entries; components choose a typed finite override. A local-checkpoint topology creates no mirror outbox rows, and refuses compaction over unshipped outbox rows only when a durable mirror head was recorded — evidence of a real replay consumer. Outbox rows present with no head ever recorded are vestige of pre-topology engine generations that wrote the outbox unconditionally; local-checkpoint compaction trims them with the covered history rather than blocking on them (v0.11.1). A mirror topology writes every outbox row transactionally and rejects local-checkpoint compaction; it compacts only through a durable server acknowledgement. Later opens reject a policy that differs from the persisted topology or budget.
 - Multi-table derived-history retraction uses the engine-owned compaction boundary: it persists the complete typed staged plan before any row changes, atomically applies all planned rows and their version/outbox effects, then survives restart through verified checkpoint publication and configured history-floor advancement. Components register their family directory and resolve a pending intent during open before serving.
 - The versioned log is stored in the same `.sema` file as table state.
   A successful write inserts the table mutation, the metadata
@@ -593,6 +593,16 @@ identified variants, multi-operation commit, and imported suffix
 entries). The unshipped suffix is therefore complete by construction;
 this is what forced storage layout 3. Layout 4 follows from the key
 kind split in the versioned log and checkpoint view.
+
+The outbox is the local half of the mirror protocol — the durable
+queue a mirror daemon would drain — not the mirror itself. Mirror is
+unshipped: in the psyche's words, "mirroring is a thing which we
+haven't shipped yet. It's not a place, it's just the other daemon
+running on another host." A store must never assume an outbox consumer
+exists. Mirror activation — a durable mirror head recorded through
+`acknowledge_mirror` — is a deliberate act, never a default; a store
+that never recorded one carries no live outbox obligation, and its
+outbox rows are vestige, inert under local-checkpoint compaction.
 
 The typed API for the future mirror actor, library-only — no
 transport, no actor, no network:
