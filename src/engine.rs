@@ -1889,13 +1889,20 @@ impl Engine {
                 VersionedRecoveryTopology::LocalCheckpoint,
                 VersionedHistoryAcknowledgement::LocalCheckpoint,
             ) => {
-                if let Some(entry) = self.unshipped_outbox()?.last() {
-                    return Err(Error::HistoryCompactionUnacknowledged {
-                        required: entry.commit_sequence().value(),
-                        acknowledged: self
-                            .mirror_head()?
-                            .map(|head| head.commit_sequence().value()),
-                    });
+                // Unshipped outbox rows block a local-checkpoint compaction
+                // only when a durable mirror head exists: a recorded head is
+                // evidence a real replay consumer sits behind the outbox, so
+                // the declared local-only topology contradicts the store. With
+                // no head ever recorded the rows are consumer-less vestige (an
+                // earlier engine wrote the outbox regardless of topology);
+                // compaction trims them with the covered history.
+                if let Some(head) = self.mirror_head()? {
+                    if let Some(entry) = self.unshipped_outbox()?.last() {
+                        return Err(Error::HistoryCompactionUnacknowledged {
+                            required: entry.commit_sequence().value(),
+                            acknowledged: Some(head.commit_sequence().value()),
+                        });
+                    }
                 }
                 Ok(())
             }
@@ -3876,5 +3883,168 @@ impl EngineOpen {
 
     pub fn versioning_policy(&self) -> Option<&VersioningPolicy> {
         self.versioning_policy.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod local_checkpoint_vestige_tests {
+    //! Regression coverage for the 2026-07-18 production wedge: a store whose
+    //! outbox rows were written by an engine generation that recorded them
+    //! regardless of topology (pre-topology engines wrote the outbox
+    //! unconditionally) must still compact under the LocalCheckpoint
+    //! topology — the vestigial rows have no consumer and are trimmed with
+    //! the covered history. A durable mirror head, by contrast, is evidence
+    //! of a real replay consumer and keeps the refusal.
+
+    use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+
+    use super::{Engine, EngineOpen, Outbox};
+    use crate::{
+        Assertion, EngineRecord, Error, FamilyName, MirrorHead, RecordKey, SchemaHash,
+        SchemaVersion, TableDescriptor, TableName, VersionedHistoryAcknowledgement,
+        VersionedHistoryRetention, VersionedStoreName, VersioningPolicy,
+    };
+
+    #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+    #[rkyv(derive(Debug))]
+    struct Thought {
+        key: String,
+        body: String,
+    }
+
+    impl Thought {
+        fn new(key: impl Into<String>, body: impl Into<String>) -> Self {
+            Self {
+                key: key.into(),
+                body: body.into(),
+            }
+        }
+    }
+
+    impl EngineRecord for Thought {
+        fn record_key(&self) -> RecordKey {
+            RecordKey::new(self.key.clone())
+        }
+    }
+
+    struct VestigeFixture {
+        directory: tempfile::TempDir,
+    }
+
+    impl VestigeFixture {
+        fn new() -> Self {
+            Self {
+                directory: tempfile::tempdir().expect("temp directory"),
+            }
+        }
+
+        fn open(&self) -> Engine {
+            Engine::open(
+                EngineOpen::new(
+                    self.directory.path().join("vestige.sema"),
+                    SchemaVersion::new(1),
+                )
+                .with_versioning(VersioningPolicy::new(VersionedStoreName::new("vestige"))),
+            )
+            .expect("local-checkpoint engine opens")
+        }
+
+        fn table(&self) -> TableDescriptor<Thought> {
+            TableDescriptor::new(
+                TableName::new("thoughts"),
+                FamilyName::new("thought"),
+                SchemaHash::for_label("thought-v1"),
+            )
+        }
+
+        /// Plant a legacy outbox row for an already-logged versioned entry,
+        /// reproducing what a pre-topology engine generation left behind.
+        fn plant_vestige_row(engine: &Engine, index: usize) {
+            let entry = engine.versioned_commit_log().expect("versioned log reads")[index].clone();
+            engine
+                .storage
+                .write(|transaction| Outbox::record(transaction, &entry))
+                .expect("vestige outbox row lands");
+        }
+    }
+
+    #[test]
+    fn local_checkpoint_compaction_trims_consumerless_vestige_outbox() {
+        let fixture = VestigeFixture::new();
+        let mut engine = fixture.open();
+        let table = engine
+            .register_table(fixture.table())
+            .expect("table registers");
+        engine
+            .assert(Assertion::new(table, Thought::new("alpha", "first")))
+            .expect("first write");
+        engine
+            .assert(Assertion::new(table, Thought::new("beta", "second")))
+            .expect("second write");
+        VestigeFixture::plant_vestige_row(&engine, 0);
+        VestigeFixture::plant_vestige_row(&engine, 1);
+        assert_eq!(
+            engine.unshipped_outbox().expect("outbox reads").len(),
+            2,
+            "vestige rows are visible before compaction"
+        );
+
+        let compacted = engine
+            .compact_versioned_history(
+                VersionedHistoryRetention::new(0),
+                VersionedHistoryAcknowledgement::LocalCheckpoint,
+            )
+            .expect("a consumer-less vestige outbox never blocks local-checkpoint compaction");
+        assert_eq!(compacted.compacted_entries(), 2);
+        assert!(
+            engine.unshipped_outbox().expect("outbox reads").is_empty(),
+            "compaction trims the vestige rows with the covered history"
+        );
+
+        engine
+            .assert(Assertion::new(table, Thought::new("gamma", "third")))
+            .expect("post-compaction write maintains cleanly");
+    }
+
+    #[test]
+    fn local_checkpoint_compaction_still_refuses_past_a_durable_mirror_head() {
+        let fixture = VestigeFixture::new();
+        let mut engine = fixture.open();
+        let table = engine
+            .register_table(fixture.table())
+            .expect("table registers");
+        engine
+            .assert(Assertion::new(table, Thought::new("alpha", "first")))
+            .expect("first write");
+        engine
+            .assert(Assertion::new(table, Thought::new("beta", "second")))
+            .expect("second write");
+        VestigeFixture::plant_vestige_row(&engine, 0);
+        VestigeFixture::plant_vestige_row(&engine, 1);
+
+        let log = engine.versioned_commit_log().expect("versioned log reads");
+        let acknowledged = log[0].commit_sequence();
+        engine
+            .acknowledge_mirror(MirrorHead::new(acknowledged, log[0].entry_digest()))
+            .expect("mirror head lands");
+
+        let error = engine
+            .compact_versioned_history(
+                VersionedHistoryRetention::new(0),
+                VersionedHistoryAcknowledgement::LocalCheckpoint,
+            )
+            .expect_err("a durable mirror head keeps the unshipped-outbox refusal");
+        assert!(matches!(
+            error,
+            Error::HistoryCompactionUnacknowledged {
+                acknowledged: Some(head),
+                ..
+            } if head == acknowledged.value()
+        ));
+        assert_eq!(
+            engine.unshipped_outbox().expect("outbox reads").len(),
+            1,
+            "refused compaction deletes nothing past the head"
+        );
     }
 }
