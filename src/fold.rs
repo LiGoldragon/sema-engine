@@ -119,6 +119,30 @@ impl ViewKey {
     }
 }
 
+/// The identity coordinate a folded key resolves through: family name plus
+/// schema hash, exactly as the checkpoint rows and log entries declare it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ViewIdentityKey {
+    family: FamilyName,
+    schema_hash: SchemaHash,
+}
+
+impl ViewIdentityKey {
+    fn of(key: &ViewKey) -> Self {
+        Self {
+            family: key.family.clone(),
+            schema_hash: key.schema_hash,
+        }
+    }
+
+    fn from_identity(identity: &FamilyIdentity) -> Self {
+        Self {
+            family: identity.family().clone(),
+            schema_hash: identity.schema_hash(),
+        }
+    }
+}
+
 /// The fold state: per-key last-write payloads after applying
 /// checkpoint rows and versioned log operations in order, plus the
 /// set of every key the fold ever touched (for clearing stale
@@ -126,6 +150,12 @@ impl ViewKey {
 pub(crate) struct CanonicalView {
     rows: BTreeMap<ViewKey, Vec<u8>>,
     touched: BTreeSet<ViewKey>,
+    /// Every family identity the folded rows and entries themselves
+    /// declared, keyed by its resolution coordinate. The log is
+    /// self-describing: a retired identity (a declared prior a family
+    /// evolution retracted under) resolves from here even though no
+    /// current registration carries it.
+    identities: BTreeMap<ViewIdentityKey, FamilyIdentity>,
 }
 
 impl CanonicalView {
@@ -133,7 +163,14 @@ impl CanonicalView {
         Self {
             rows: BTreeMap::new(),
             touched: BTreeSet::new(),
+            identities: BTreeMap::new(),
         }
+    }
+
+    fn declare_identity(&mut self, identity: &FamilyIdentity) {
+        self.identities
+            .entry(ViewIdentityKey::from_identity(identity))
+            .or_insert_with(|| identity.clone());
     }
 
     /// Fold checkpoint rows (if any) plus versioned log entries into
@@ -182,6 +219,7 @@ impl CanonicalView {
                 table: row.family().table_name().to_owned(),
             });
         };
+        self.declare_identity(row.family());
         let key = ViewKey::new(row.family(), row.key());
         self.touched.insert(key.clone());
         self.rows.insert(key, bytes.to_vec());
@@ -195,6 +233,7 @@ impl CanonicalView {
             .ok_or_else(|| Error::ReplayMissingKey {
                 family: operation.family().family().as_str().to_owned(),
             })?;
+        self.declare_identity(operation.family());
         let key = ViewKey::new(operation.family(), &record_key);
         self.touched.insert(key.clone());
         match operation.operation() {
@@ -237,21 +276,26 @@ impl CanonicalView {
     /// record payloads; keys the fold touched but did not keep become
     /// tombstone rows that clear stale materialized state.
     pub(crate) fn into_rows(self, inventory: &[FamilyIdentity]) -> Result<MaterializeRows> {
-        let mut rows = Vec::with_capacity(self.rows.len());
+        let Self {
+            rows: folded,
+            touched,
+            identities,
+        } = self;
+        let mut rows = Vec::with_capacity(folded.len());
         let mut cleared = Vec::new();
-        for key in &self.touched {
-            if self.rows.contains_key(key) {
+        for key in &touched {
+            if folded.contains_key(key) {
                 continue;
             }
             cleared.push(ViewRow::new(
-                Self::resolve_identity(inventory, key)?,
+                Self::resolve_identity(&identities, inventory, key)?,
                 key.key.clone(),
                 VersionedPayload::tombstone(),
             ));
         }
-        for (key, payload) in &self.rows {
+        for (key, payload) in &folded {
             rows.push(ViewRow::new(
-                Self::resolve_identity(inventory, key)?,
+                Self::resolve_identity(&identities, inventory, key)?,
                 key.key.clone(),
                 VersionedPayload::record(payload.clone()),
             ));
@@ -259,7 +303,19 @@ impl CanonicalView {
         Ok(MaterializeRows { rows, cleared })
     }
 
-    fn resolve_identity(inventory: &[FamilyIdentity], key: &ViewKey) -> Result<FamilyIdentity> {
+    /// Resolve a folded key's full identity: the fold's own declared
+    /// identities first — the checkpoint rows and log entries name every
+    /// identity they carry, including priors retired by a family
+    /// evolution — then the supplied current inventory. A key in neither
+    /// is genuinely unknown.
+    fn resolve_identity(
+        identities: &BTreeMap<ViewIdentityKey, FamilyIdentity>,
+        inventory: &[FamilyIdentity],
+        key: &ViewKey,
+    ) -> Result<FamilyIdentity> {
+        if let Some(identity) = identities.get(&ViewIdentityKey::of(key)) {
+            return Ok(identity.clone());
+        }
         inventory
             .iter()
             .find(|identity| {

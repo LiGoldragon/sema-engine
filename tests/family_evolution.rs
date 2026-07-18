@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, Engine, EngineOpen, EngineRecord, Error, FamilyName, QueryPlan, RecordKey,
-    SchemaHash, SchemaVersion, TableDescriptor, TableName, VersionedPayload, VersionedStoreName,
-    VersioningPolicy,
+    SchemaHash, SchemaVersion, TableDescriptor, TableName, VersionedHistoryAcknowledgement,
+    VersionedHistoryRetention, VersionedPayload, VersionedStoreName, VersioningPolicy,
 };
 use signal_sema::SemaOperation;
 use tempfile::TempDir;
@@ -398,4 +398,39 @@ fn versioned_evolution_logs_retraction_and_assertion_as_row_history() {
 
     // The entry's derived store hash names the evolved inventory.
     assert_eq!(evolution_entry.schema_hash(), evolved.store_schema_hash());
+}
+
+/// 2026-07-18 incident, second defect: after a family evolution the versioned
+/// log names the retired prior identity (the retract half of the carried
+/// history). The checkpoint fold must resolve those keys from the identities
+/// the log itself declares — a compaction immediately after an evolution
+/// previously failed `FamilyUnknown`, wedging every store-open path whose
+/// write maintenance triggers it.
+#[test]
+fn evolved_versioned_store_checkpoints_and_compacts_over_retired_identities() {
+    let fixture = Fixture::new();
+    {
+        let mut engine = fixture.open_versioned("evolved-compaction");
+        fixture.seed_v1(
+            &mut engine,
+            &[
+                ThoughtV1::new("alpha", "first"),
+                ThoughtV1::new("beta", "second"),
+            ],
+        );
+    }
+    let mut engine = fixture.open_versioned("evolved-compaction");
+    let table = engine
+        .register_table(fixture.descriptor_v2_with_prior())
+        .expect("family evolves");
+    let compacted = engine
+        .compact_versioned_history(
+            VersionedHistoryRetention::new(0),
+            VersionedHistoryAcknowledgement::LocalCheckpoint,
+        )
+        .expect("checkpoint fold resolves retired identities from the log itself");
+    assert!(compacted.compacted_entries() > 0);
+    engine
+        .assert(Assertion::new(table, Thought::new("gamma", "third", "calm")))
+        .expect("post-compaction write maintains cleanly");
 }
