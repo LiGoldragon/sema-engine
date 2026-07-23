@@ -29,3 +29,5 @@ Sema database-operation execution.
 - Human text projection belongs at component CLI boundaries, not here.
 - Tests must include architectural-truth witnesses for dependency and
   binary absence, not only behavior tests.
+
+This repository is under fast development and constantly breaking.
