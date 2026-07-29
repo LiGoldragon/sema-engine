@@ -15,7 +15,7 @@ This repository follows the workspace skills in `/home/li/primary/skills/`.
 - Keep redb behind the `sema` kernel. Engine consumers open `.sema`
   files through `EngineOpen`; they do not import redb.
 - Use domain-keyed tables for records with stable semantic keys and
-  identified tables for schema contracts that need engine-assigned
+  identified tables for ethos contracts that need engine-assigned
   numeric record identifiers.
 - Add a constraint test when adding an architectural rule.
 - Subscription delivery is post-commit. Tests must prove a failing or

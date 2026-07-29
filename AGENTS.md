@@ -23,7 +23,7 @@ Sema database-operation execution.
 - Sema operations enter through `signal-sema` vocabulary. Component
   contracts own their domain-specific public operations and the daemon
   lowers them into engine calls.
-- Prefer improving `sema-engine` when schema-derived components expose a
+- Prefer improving `sema-engine` when ethos-derived components expose a
   reusable storage need. Do not force every component to hand-roll the
   same compatibility shim around a mismatched current API.
 - Human text projection belongs at component CLI boundaries, not here.

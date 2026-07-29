@@ -24,7 +24,7 @@ for actor enqueue consumers that need deterministic post-commit ordering
 without polling.
 
 Two table identities are supported. Domain-keyed families use
-`TableDescriptor<RecordValue>` plus `EngineRecord::record_key`. Schema
+`TableDescriptor<RecordValue>` plus `EngineRecord::record_key`. Ethos
 contracts that require engine-assigned numeric identity use
 `IdentifiedTableDescriptor<RecordValue>`; `Engine` allocates durable
 `RecordIdentifier` values, persists the counter across reopen, and returns

@@ -38,7 +38,7 @@ sections that follow realize it.
   write transaction at every choke point. Per Spirit 29pb / j487; per
   Spirit 29pb: atomic server-backed durability, state loss unacceptable.
 - The engine surface follows the architecture of its users rather than
-  forcing components to build compatibility shims. When a schema-derived
+  forcing components to build compatibility shims. When an ethos-derived
   component exposes a reusable storage need, the answer is to improve
   this shared engine surface, not to port the component onto a
   mismatched API. The crate stays library-only and component-agnostic:
@@ -49,7 +49,7 @@ sections that follow realize it.
   GC roots, event log persisted with self-resume) before any
   in-memory shortcut, so the on-disk log is authoritative from the
   start rather than retrofitted. Per Spirit fosp.
-- The [ethos] component holds the compiled binary runtime schema (O(1)
+- The [ethos] component holds the compiled binary runtime [ethos] (O(1)
   lookup, version-diff and namespace tables); NOTA is the source
   authoring format, not the runtime shape. Per Spirit fosp.
 - Every path that introduces entries to a versioned branch routes
@@ -404,7 +404,7 @@ payload-bearing version replay, table introspection, best-effort
 post-commit subscription delivery for write operations, and durable
 storage through `sema`.
 
-For schema contracts that need engine-assigned numeric record identity, a
+For ethos contracts that need engine-assigned numeric record identity, a
 component registers an identified family instead of deriving identity from
 the record payload:
 
