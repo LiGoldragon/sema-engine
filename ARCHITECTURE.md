@@ -49,7 +49,7 @@ sections that follow realize it.
   GC roots, event log persisted with self-resume) before any
   in-memory shortcut, so the on-disk log is authoritative from the
   start rather than retrofitted. Per Spirit fosp.
-- The schema component holds the compiled binary runtime schema (O(1)
+- The [ethos] component holds the compiled binary runtime schema (O(1)
   lookup, version-diff and namespace tables); NOTA is the source
   authoring format, not the runtime shape. Per Spirit fosp.
 - Every path that introduces entries to a versioned branch routes
