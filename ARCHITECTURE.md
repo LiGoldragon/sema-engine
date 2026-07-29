@@ -724,10 +724,11 @@ current state the engine still keys stored-record identity on the per-family
 This is the target, not the current state. Component daemons still carry
 hand-written descriptor paths — for example spirit's guardian journal and
 production migration hand-construct their `TableDefinition` declarations. The
-schema-engine upgrade replaces those hand-written declarations with
-macro-emitted descriptors derived from the component's `sema.schema` document,
-and the surviving hand-written paths are drift to be eliminated as each
-component converts.
+macro-pattern upgrade — named `schema-engine` here before that repo was
+renamed `ethos-engine` on 2026-07-27 (S1R entry 7) — replaces those
+hand-written declarations with macro-emitted descriptors derived from the
+component's `sema.schema` document, and the surviving hand-written paths are
+drift to be eliminated as each component converts.
 
 **References:**
 - `reports/designer/326-v13-spirit-complete-schema-vision.md` — schema language + macro pattern
