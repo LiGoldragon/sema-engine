@@ -10,6 +10,8 @@ use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
+use crate::{Error, Result};
+
 #[derive(
     rkyv::Archive,
     rkyv::Serialize,
@@ -164,6 +166,17 @@ where
 {
 }
 
+/// A typed value that can address a domain-keyed Sema table.
+///
+/// The complete validated portable archive is encoded into the storage
+/// kernel's current string coordinate. Callers never choose that coordinate
+/// or stringify the domain value themselves, and two equal typed keys always
+/// produce the same redb key bytes.
+pub trait DomainRecordKey {
+    /// Project this typed key into the engine's domain-key sum.
+    fn to_record_key(&self) -> Result<RecordKey>;
+}
+
 impl<RecordValue> EngineStoredValue for RecordValue
 where
     RecordValue: Archive
@@ -176,6 +189,29 @@ where
             Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
         >,
 {
+}
+
+impl<KeyValue> DomainRecordKey for KeyValue
+where
+    KeyValue: EngineStoredValue,
+    KeyValue::Archived: RkyvDeserialize<KeyValue, HighDeserializer<rancor::Error>>
+        + for<'validation> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+        >,
+{
+    fn to_record_key(&self) -> Result<RecordKey> {
+        let bytes =
+            rkyv::to_bytes::<rancor::Error>(self).map_err(|source| Error::DomainKeyArchive {
+                message: source.to_string(),
+            })?;
+        let mut encoded = String::with_capacity(5 + bytes.len() * 2);
+        encoded.push_str("rkyv:");
+        for byte in bytes.iter() {
+            use std::fmt::Write as _;
+            write!(encoded, "{byte:02x}").expect("String writes cannot fail");
+        }
+        Ok(RecordKey::domain(encoded))
+    }
 }
 
 pub trait EngineStoredRecord: EngineRecord + EngineStoredValue

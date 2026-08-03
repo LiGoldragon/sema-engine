@@ -8,12 +8,74 @@ use rkyv::validation::Validator;
 use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 
-use crate::{EngineStoredValue, FamilyIdentity, FamilyName, RecordIdentifier, SchemaHash};
+use crate::{
+    DomainRecordKey, EngineStoredValue, FamilyIdentity, FamilyName, KeyedAssertion, QueryPlan,
+    RecordIdentifier, RecordKey, Result, SchemaHash,
+};
 
 /// Key suffix for one identified table's durable next-record-identifier
 /// counter row. Checkpoint inventories reuse it so an imported store
 /// restores the exact counter keys the original engine wrote.
 pub(crate) const IDENTIFIED_COUNTER_SUFFIX: &str = "next_record_identifier";
+
+/// The generated declaration of one domain-keyed Sema table.
+///
+/// Implementations provide only structural data: the current redb coordinate,
+/// stable family identity, schema identity, stored record type, and authored
+/// key type. The provided constructors are the sole shared lowering from that
+/// declaration into the engine API.
+pub trait TableSpecification {
+    /// The value stored in the table.
+    type Record;
+
+    /// The authored type that addresses one record.
+    type Key: DomainRecordKey;
+
+    /// Current redb table coordinate.
+    const TABLE_NAME: TableName;
+
+    /// Stable encoded family identity; independent of the current spelling.
+    const FAMILY_NAME: &'static str;
+
+    /// Content identity of the table declaration's record/key shape.
+    const SCHEMA_HASH: SchemaHash;
+
+    /// Build the descriptor registered by the owning component's engine.
+    fn descriptor() -> TableDescriptor<Self::Record> {
+        TableDescriptor::new(
+            Self::TABLE_NAME,
+            FamilyName::new(Self::FAMILY_NAME),
+            Self::SCHEMA_HASH,
+        )
+    }
+
+    /// Build the typed table coordinate used by read and write requests.
+    fn table_reference() -> TableReference<Self::Record> {
+        TableReference::new(Self::TABLE_NAME)
+    }
+
+    /// Archive one authored key into the engine's domain-key representation.
+    fn record_key(key: &Self::Key) -> Result<RecordKey> {
+        key.to_record_key()
+    }
+
+    /// Build a keyed assertion whose key type is fixed by this declaration.
+    fn assertion(key: &Self::Key, record: Self::Record) -> Result<KeyedAssertion<Self::Record>> {
+        Ok(KeyedAssertion::new(
+            Self::table_reference(),
+            Self::record_key(key)?,
+            record,
+        ))
+    }
+
+    /// Build an exact-key query whose key type is fixed by this declaration.
+    fn query(key: &Self::Key) -> Result<QueryPlan<Self::Record>> {
+        Ok(QueryPlan::key(
+            Self::table_reference(),
+            Self::record_key(key)?,
+        ))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TableName {
@@ -178,7 +240,8 @@ impl<RecordValue> TableDescriptor<RecordValue> {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
-        self.evolution.push(EvolutionStep::from_prior(prior, convert));
+        self.evolution
+            .push(EvolutionStep::from_prior(prior, convert));
         self
     }
 

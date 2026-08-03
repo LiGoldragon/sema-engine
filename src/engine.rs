@@ -27,8 +27,8 @@ use crate::staging::{
 };
 use crate::subscribe::{ActiveSubscription, SubscriptionRegistry};
 use crate::{
-    Catalog, CommitRequest, DeltaKind, EngineStoredRecord, EngineStoredValue, Error,
-    EvolutionStep, FamilyIdentity, IdentifiedAssertion, IdentifiedMutation, IdentifiedMutationReceipt,
+    Catalog, CommitRequest, DeltaKind, EngineStoredRecord, EngineStoredValue, Error, EvolutionStep,
+    FamilyIdentity, IdentifiedAssertion, IdentifiedMutation, IdentifiedMutationReceipt,
     IdentifiedQueryPlan, IdentifiedQuerySnapshot, IdentifiedRecord, IdentifiedRetraction,
     IdentifiedTableDescriptor, IdentifiedTableReference, InitialSnapshot, KeyedAssertion,
     KeyedMutation, QueryPlan, QuerySnapshot, RecordIdentifier, RecordKey, ReplayReceipt, Result,
@@ -273,9 +273,9 @@ impl Engine {
     {
         let name = *descriptor.name();
         if carried.is_empty() {
-            return Ok(self.storage.write(|transaction| {
-                CATALOG.insert(transaction, name.as_str(), evolved)
-            })?);
+            return Ok(self
+                .storage
+                .write(|transaction| CATALOG.insert(transaction, name.as_str(), evolved))?);
         }
         let evolved_identity = evolved.identity().clone();
         let mut log_operations = Vec::with_capacity(carried.len() * 2);

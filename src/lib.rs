@@ -57,7 +57,8 @@ pub use query::{
     RuleSetRef, UnificationPlan, ValidationReceipt,
 };
 pub use record::{
-    EngineRecord, EngineStoredRecord, EngineStoredValue, RecordIdentifier, RecordKey, RecordKeyKind,
+    DomainRecordKey, EngineRecord, EngineStoredRecord, EngineStoredValue, RecordIdentifier,
+    RecordKey, RecordKeyKind,
 };
 pub use sema::{
     Error as StorageKernelError, ReadTransaction as StorageReadTransaction,
@@ -77,7 +78,7 @@ pub use subscribe::{
 };
 pub use table::{
     EvolutionStep, IdentifiedRecord, IdentifiedTableDescriptor, IdentifiedTableReference,
-    TableDescriptor, TableName, TableReference,
+    TableDescriptor, TableName, TableReference, TableSpecification,
 };
 pub use versioning::{
     EntryDigest, FamilyIdentity, FamilyName, ReplayReceipt, SchemaHash, StoreSchemaHash,

@@ -230,10 +230,7 @@ fn undeclared_stored_identity_keeps_failing_closed() {
         fixture.family(),
         fixture.hash_v2(),
     ));
-    assert!(matches!(
-        outcome,
-        Err(Error::FamilyIdentityMismatch { .. })
-    ));
+    assert!(matches!(outcome, Err(Error::FamilyIdentityMismatch { .. })));
     drop(plain);
 
     let mut untouched = fixture.open_plain("closed");
@@ -260,10 +257,7 @@ fn another_family_at_the_same_table_is_not_evolvable() {
         TableDescriptor::<Thought>::new(THOUGHTS, FamilyName::new("memo"), fixture.hash_v2())
             .with_prior::<ThoughtV1>(fixture.hash_v1(), ThoughtV1::into_current),
     );
-    assert!(matches!(
-        outcome,
-        Err(Error::FamilyIdentityMismatch { .. })
-    ));
+    assert!(matches!(outcome, Err(Error::FamilyIdentityMismatch { .. })));
 }
 
 #[test]
@@ -299,8 +293,8 @@ fn a_prior_that_does_not_decode_fails_and_leaves_the_store_intact() {
     let outcome = wrong.register_table(
         TableDescriptor::<Thought>::new(THOUGHTS, fixture.family(), fixture.hash_v2())
             .with_prior::<CountedThought>(fixture.hash_v1(), |counted| {
-                Thought::new(counted.key, "reinterpreted", "never")
-            }),
+            Thought::new(counted.key, "reinterpreted", "never")
+        }),
     );
     assert!(outcome.is_err(), "mismatched prior bytes must refuse");
     drop(wrong);
@@ -355,7 +349,10 @@ fn two_declared_generations_each_evolve_directly() {
         ))
         .expect("v2 family registers");
     at_v2
-        .assert(Assertion::new(v2_table, Thought::new("beta", "second", "byte-compatible")))
+        .assert(Assertion::new(
+            v2_table,
+            Thought::new("beta", "second", "byte-compatible"),
+        ))
         .expect("v2 row asserts");
     drop(at_v2);
     let mut evolved_v2 = fixture.open_plain("ladder-v2");
@@ -382,9 +379,7 @@ fn versioned_evolution_logs_retraction_and_assertion_as_row_history() {
     evolved
         .register_table(fixture.descriptor_v2_with_prior())
         .expect("versioned store evolves");
-    let log = evolved
-        .versioned_commit_log()
-        .expect("versioned log reads");
+    let log = evolved.versioned_commit_log().expect("versioned log reads");
     let evolution_entry = log.last().expect("evolution entry exists");
 
     let operations: Vec<_> = evolution_entry.operations().iter().collect();
@@ -431,6 +426,9 @@ fn evolved_versioned_store_checkpoints_and_compacts_over_retired_identities() {
         .expect("checkpoint fold resolves retired identities from the log itself");
     assert!(compacted.compacted_entries() > 0);
     engine
-        .assert(Assertion::new(table, Thought::new("gamma", "third", "calm")))
+        .assert(Assertion::new(
+            table,
+            Thought::new("gamma", "third", "calm"),
+        ))
         .expect("post-compaction write maintains cleanly");
 }
