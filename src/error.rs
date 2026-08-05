@@ -58,9 +58,6 @@ pub enum Error {
     #[error("versioned payload decode failed for table {table}: {message}")]
     VersionedPayloadDecode { table: String, message: String },
 
-    #[error("typed domain key archive failed: {message}")]
-    DomainKeyArchive { message: String },
-
     #[error(
         "versioned log operation for family {family} has no record key; replay needs keyed operations"
     )]

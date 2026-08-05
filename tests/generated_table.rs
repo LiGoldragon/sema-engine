@@ -1,4 +1,6 @@
-use sema_engine::{Engine, EngineOpen, SchemaHash, SchemaVersion, TableName, TableSpecification};
+use sema_engine::{
+    Engine, EngineOpen, RecordKey, Result, SchemaHash, SchemaVersion, TableName, TableSpecification,
+};
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
 struct Domain(String);
@@ -18,6 +20,10 @@ impl TableSpecification for Records {
     const TABLE_NAME: TableName = TableName::new("records");
     const FAMILY_NAME: &'static str = "zRecordsStableIdentity";
     const SCHEMA_HASH: SchemaHash = SchemaHash::new([7; 32]);
+
+    fn record_key(key: &Self::Key) -> Result<RecordKey> {
+        Ok(RecordKey::new(key.0.clone()))
+    }
 }
 
 #[test]
@@ -31,6 +37,12 @@ fn generated_style_table_specification_writes_and_reads_a_typed_domain_key() {
         .expect("generated table registers");
 
     let domain = Domain("software/code-generation".to_owned());
+    assert_eq!(
+        Records::record_key(&domain)
+            .expect("generated source key projection")
+            .to_owned_string(),
+        "software/code-generation"
+    );
     let stored = StoredRecord {
         identifier: 17,
         body: "typed value".to_owned(),

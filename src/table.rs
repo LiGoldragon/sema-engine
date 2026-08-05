@@ -9,8 +9,8 @@ use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 
 use crate::{
-    DomainRecordKey, EngineStoredValue, FamilyIdentity, FamilyName, KeyedAssertion, QueryPlan,
-    RecordIdentifier, RecordKey, Result, SchemaHash,
+    EngineStoredValue, FamilyIdentity, FamilyName, KeyedAssertion, QueryPlan, RecordIdentifier,
+    RecordKey, Result, SchemaHash,
 };
 
 /// Key suffix for one identified table's durable next-record-identifier
@@ -28,8 +28,12 @@ pub trait TableSpecification {
     /// The value stored in the table.
     type Record;
 
-    /// The authored type that addresses one record.
-    type Key: DomainRecordKey;
+    /// The source-declared type that addresses one record.
+    ///
+    /// This carries no blanket archive-to-string conversion.  The generated
+    /// declaration below owns the exact key projection that its source
+    /// archive contract declares.
+    type Key;
 
     /// Current redb table coordinate.
     const TABLE_NAME: TableName;
@@ -54,10 +58,12 @@ pub trait TableSpecification {
         TableReference::new(Self::TABLE_NAME)
     }
 
-    /// Archive one authored key into the engine's domain-key representation.
-    fn record_key(key: &Self::Key) -> Result<RecordKey> {
-        key.to_record_key()
-    }
+    /// Project one source-declared key into its durable domain coordinate.
+    ///
+    /// Implementors must provide this explicitly.  The engine deliberately
+    /// has no generic rkyv-key encoder: archive bytes are evidence of a value
+    /// layout, not an unlicensed replacement for its source key semantics.
+    fn record_key(key: &Self::Key) -> Result<RecordKey>;
 
     /// Build a keyed assertion whose key type is fixed by this declaration.
     fn assertion(key: &Self::Key, record: Self::Record) -> Result<KeyedAssertion<Self::Record>> {

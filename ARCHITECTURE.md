@@ -132,10 +132,11 @@ sections that follow realize it.
   (`EngineRecord`) or explicit keys (`KeyedAssertion` /
   `KeyedMutation`) for imported schema/contract record types.
 - Ethos-generated domain tables implement `TableSpecification`. The
-  declaration fixes the stored record type, authored key type, current table
-  coordinate, stable family identity, and schema hash. Its provided assertion
-  and query constructors archive the typed key into the storage coordinate;
-  component code does not invent string keys or open redb directly.
+  declaration fixes the stored record type, source-provenanced key type,
+  current table coordinate, stable family identity, and schema hash. Its
+  generated key projection writes the exact source-declared domain coordinate;
+  the engine supplies no blanket archive-to-string encoder, and component code
+  does not invent string keys or open redb directly.
 - A generated table declaration carries no evolution behavior. Fresh-store
   registration uses its current descriptor only; prior shapes still require an
   explicit engine-owned evolution step and are outside the MVP clean cut.

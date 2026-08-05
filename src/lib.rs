@@ -57,8 +57,7 @@ pub use query::{
     RuleSetRef, UnificationPlan, ValidationReceipt,
 };
 pub use record::{
-    DomainRecordKey, EngineRecord, EngineStoredRecord, EngineStoredValue, RecordIdentifier,
-    RecordKey, RecordKeyKind,
+    EngineRecord, EngineStoredRecord, EngineStoredValue, RecordIdentifier, RecordKey, RecordKeyKind,
 };
 pub use sema::{
     Error as StorageKernelError, ReadTransaction as StorageReadTransaction,
