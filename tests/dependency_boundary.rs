@@ -19,6 +19,10 @@ impl RepositoryFixture {
         fs::read_to_string(self.root.join("Cargo.toml")).expect("Cargo.toml is readable")
     }
 
+    fn cargo_lock(&self) -> String {
+        fs::read_to_string(self.root.join("Cargo.lock")).expect("Cargo.lock is readable")
+    }
+
     fn has_file(&self, path: impl AsRef<Path>) -> bool {
         self.root.join(path).exists()
     }
@@ -114,11 +118,12 @@ fn sema_engine_normal_dependency_tree_is_one_exact_runtime_family() {
 fn strict_sema_generation_uses_one_exact_published_producer_train() {
     let fixture = RepositoryFixture::current();
     let cargo = fixture.cargo_toml();
+    let lock = fixture.cargo_lock();
 
     for exact_dependency in [
         "core-ethos = { git = \"https://github.com/LiGoldragon/core-ethos.git\", rev = \"427fd74a8217f557cfabdfe0ff23b784c855bf85\" }",
         "core-nomos = { git = \"https://github.com/LiGoldragon/core-nomos.git\", rev = \"ff675b264e3650afb88291036ec2bdd97292a2e7\" }",
-        "schema-rust = { git = \"https://github.com/LiGoldragon/schema-rust.git\", rev = \"3c122cb62301f0b77556c05bc270d79f64a8d6d3\", default-features = false }",
+        "schema-rust = { git = \"https://github.com/LiGoldragon/schema-rust.git\", rev = \"34b912a7703f4f9419ceff539aa3804513d1ef28\", default-features = false }",
         "sema-translator = { git = \"https://github.com/LiGoldragon/sema-translator.git\", rev = \"6b5499c0d25c801b56582fdcd8e021c3293a6d4d\", default-features = false, features = [\"bootstrap\"] }",
     ] {
         assert!(
@@ -126,6 +131,11 @@ fn strict_sema_generation_uses_one_exact_published_producer_train() {
             "strict Sema consumer omitted exact producer {exact_dependency}"
         );
     }
+    assert_eq!(lock.matches("name = \"schema-rust\"").count(), 1);
+    assert!(
+        !lock.contains("name = \"schema-language\""),
+        "the deleted pre-bootstrap schema world must not enter the Sema proof graph"
+    );
 }
 
 #[test]
