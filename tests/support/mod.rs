@@ -228,7 +228,7 @@ fn external_storage(local: u16, fingerprint: u8) -> ExternalStorageProvenance {
         [fingerprint; 32],
         StorageProvenanceOwner::new(
             "https://github.com/LiGoldragon/core-ethos".to_owned(),
-            "7a1384874f3747de97c6ccbb4ae6fa2149b27330".to_owned(),
+            "249ed6ac5b8a3a84fee5884bcb35b929f07e9166".to_owned(),
         )
         .expect("storage provenance names an exact owner revision"),
     )

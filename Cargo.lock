@@ -123,14 +123,9 @@ dependencies = [
 [[package]]
 name = "core-ethos"
 version = "0.28.0"
-source = "git+https://github.com/LiGoldragon/core-ethos.git?rev=7a1384874f3747de97c6ccbb4ae6fa2149b27330#7a1384874f3747de97c6ccbb4ae6fa2149b27330"
+source = "git+https://github.com/LiGoldragon/core-ethos.git?rev=249ed6ac5b8a3a84fee5884bcb35b929f07e9166#249ed6ac5b8a3a84fee5884bcb35b929f07e9166"
 dependencies = [
- "content-identity 0.3.0",
- "content-identity 0.5.0",
- "name-table 0.1.0",
  "name-table 0.3.0",
- "nomos-types",
- "protos",
  "raw-discovery",
  "rkyv",
  "signal-sema-translator",
@@ -158,20 +153,12 @@ dependencies = [
 [[package]]
 name = "core-nomos"
 version = "0.40.0"
-source = "git+https://github.com/LiGoldragon/core-nomos.git?rev=4758e8db3c72e7c84c30c1a0b597b6d9ed65d35d#4758e8db3c72e7c84c30c1a0b597b6d9ed65d35d"
+source = "git+https://github.com/LiGoldragon/core-nomos.git?rev=a5e9aeeed90445a7df57ee1c4fda8e4be761b985#a5e9aeeed90445a7df57ee1c4fda8e4be761b985"
 dependencies = [
- "content-identity 0.3.0",
  "content-identity 0.5.0",
  "core-ethos",
  "core-logos",
- "name-table 0.1.0",
- "name-table 0.3.0",
- "protos",
- "raw-discovery",
- "rkyv",
- "rust-logos",
  "signal-sema-translator",
- "structural-codec",
  "thiserror",
 ]
 
@@ -343,14 +330,6 @@ dependencies = [
  "content-identity 0.5.0",
  "rkyv",
  "thiserror",
-]
-
-[[package]]
-name = "nomos-types"
-version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/nomos-types.git?rev=a7b831e0540a8ad263cd07ed44ec4c95c56771fb#a7b831e0540a8ad263cd07ed44ec4c95c56771fb"
-dependencies = [
- "rkyv",
 ]
 
 [[package]]
@@ -555,7 +534,7 @@ dependencies = [
 [[package]]
 name = "schema-rust"
 version = "0.12.1"
-source = "git+https://github.com/LiGoldragon/schema-rust.git?rev=c1d2ae1b0dd189cd8c8788a2cfc062e26c0377f3#c1d2ae1b0dd189cd8c8788a2cfc062e26c0377f3"
+source = "git+https://github.com/LiGoldragon/schema-rust.git?rev=9bd0767a387774ea70f8cf4b9b5e3d3617cf7671#9bd0767a387774ea70f8cf4b9b5e3d3617cf7671"
 dependencies = [
  "core-ethos",
  "core-nomos",
@@ -605,7 +584,7 @@ dependencies = [
 [[package]]
 name = "sema-translator"
 version = "0.6.0"
-source = "git+https://github.com/LiGoldragon/sema-translator.git?rev=4675e5ddfdd0d24144498ec9b7d2e5b9cb422249#4675e5ddfdd0d24144498ec9b7d2e5b9cb422249"
+source = "git+https://github.com/LiGoldragon/sema-translator.git?rev=bc8410dfe4d449cc0e820a2c5b4d44496ad92acd#bc8410dfe4d449cc0e820a2c5b4d44496ad92acd"
 dependencies = [
  "core-ethos",
  "name-table 0.3.0",
