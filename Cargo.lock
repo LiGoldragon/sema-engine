@@ -503,8 +503,8 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "schema-rust"
-version = "0.14.0"
-source = "git+https://github.com/LiGoldragon/schema-rust.git?rev=34b912a7703f4f9419ceff539aa3804513d1ef28#34b912a7703f4f9419ceff539aa3804513d1ef28"
+version = "0.15.0"
+source = "git+https://github.com/LiGoldragon/schema-rust.git?rev=9e36587c85bd69357e9042729ba2df0052799756#9e36587c85bd69357e9042729ba2df0052799756"
 dependencies = [
  "core-ethos",
  "core-nomos",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "sema-engine"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "blake3",
  "core-ethos",

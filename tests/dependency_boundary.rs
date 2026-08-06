@@ -123,7 +123,7 @@ fn strict_sema_generation_uses_one_exact_published_producer_train() {
     for exact_dependency in [
         "core-ethos = { git = \"https://github.com/LiGoldragon/core-ethos.git\", rev = \"427fd74a8217f557cfabdfe0ff23b784c855bf85\" }",
         "core-nomos = { git = \"https://github.com/LiGoldragon/core-nomos.git\", rev = \"ff675b264e3650afb88291036ec2bdd97292a2e7\" }",
-        "schema-rust = { git = \"https://github.com/LiGoldragon/schema-rust.git\", rev = \"34b912a7703f4f9419ceff539aa3804513d1ef28\", default-features = false }",
+        "schema-rust = { git = \"https://github.com/LiGoldragon/schema-rust.git\", rev = \"9e36587c85bd69357e9042729ba2df0052799756\", default-features = false }",
         "sema-translator = { git = \"https://github.com/LiGoldragon/sema-translator.git\", rev = \"6b5499c0d25c801b56582fdcd8e021c3293a6d4d\", default-features = false, features = [\"bootstrap\"] }",
     ] {
         assert!(
