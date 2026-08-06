@@ -121,17 +121,36 @@ fn strict_sema_generation_uses_one_exact_published_producer_train() {
     let lock = fixture.cargo_lock();
 
     for exact_dependency in [
-        "core-ethos = { git = \"https://github.com/LiGoldragon/core-ethos.git\", rev = \"427fd74a8217f557cfabdfe0ff23b784c855bf85\" }",
-        "core-nomos = { git = \"https://github.com/LiGoldragon/core-nomos.git\", rev = \"ff675b264e3650afb88291036ec2bdd97292a2e7\" }",
-        "schema-rust = { git = \"https://github.com/LiGoldragon/schema-rust.git\", rev = \"9e36587c85bd69357e9042729ba2df0052799756\", default-features = false }",
-        "sema-translator = { git = \"https://github.com/LiGoldragon/sema-translator.git\", rev = \"6b5499c0d25c801b56582fdcd8e021c3293a6d4d\", default-features = false, features = [\"bootstrap\"] }",
+        "core-ethos = { git = \"https://github.com/LiGoldragon/core-ethos.git\", rev = \"43b48c779c54ee9f05cbcc111d5d88074b162461\" }",
+        "core-nomos = { git = \"https://github.com/LiGoldragon/core-nomos.git\", rev = \"7b60721d199551b648d42a49934a2f0ef950c595\" }",
+        "rust-logos = { git = \"https://github.com/LiGoldragon/rust-logos.git\", rev = \"081e99596826b15e2ff7f1356ae8d797b18aeffc\" }",
+        "schema-rust = { git = \"https://github.com/LiGoldragon/schema-rust.git\", rev = \"664335240a40728826cfaa09e3100cd867031912\", default-features = false }",
+        "sema-translator = { git = \"https://github.com/LiGoldragon/sema-translator.git\", rev = \"287fbd728a05b1a6be1dc8a28bcf3ca06d9916b3\", default-features = false }",
+        "signal-frame = { git = \"https://github.com/LiGoldragon/signal-frame.git\", rev = \"8aa0bcaeb29fe9e461a11706a469638d2fd109ac\", default-features = false }",
+        "signal-sema-translator = { git = \"https://github.com/LiGoldragon/signal-sema-translator.git\", rev = \"3f41813dd63904c7e2b3da4382eff64ed1bf12fe\" }",
     ] {
         assert!(
             cargo.contains(exact_dependency),
             "strict Sema consumer omitted exact producer {exact_dependency}"
         );
     }
-    assert_eq!(lock.matches("name = \"schema-rust\"").count(), 1);
+    for sole_package in [
+        "core-ethos",
+        "core-logos",
+        "core-nomos",
+        "protos",
+        "rust-logos",
+        "schema-rust",
+        "sema-translator",
+        "signal-frame",
+        "signal-sema-translator",
+    ] {
+        assert_eq!(
+            lock.matches(&format!("name = \"{sole_package}\"")).count(),
+            1,
+            "strict Sema generation admitted more than one {sole_package} source"
+        );
+    }
     assert!(
         !lock.contains("name = \"schema-language\""),
         "the deleted pre-bootstrap schema world must not enter the Sema proof graph"
