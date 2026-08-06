@@ -92,6 +92,52 @@ fn sema_engine_normal_dependency_tree_has_no_nota_next() {
 }
 
 #[test]
+fn sema_engine_normal_dependency_tree_is_one_exact_runtime_family() {
+    let fixture = RepositoryFixture::current();
+    let duplicates =
+        fixture.cargo_tree(&["--edges", "normal", "--no-default-features", "--duplicates"]);
+    assert!(
+        duplicates.trim().is_empty(),
+        "sema-engine normal graph contains duplicate package families:\n{duplicates}"
+    );
+
+    let tree = fixture.cargo_tree(&["--edges", "normal", "--no-default-features"]);
+    for build_time_only in ["schema-rust", "sema-translator", "core-ethos", "core-nomos"] {
+        assert!(
+            !tree.contains(build_time_only),
+            "{build_time_only} must remain source-generation machinery, not runtime substrate:\n{tree}"
+        );
+    }
+}
+
+#[test]
+fn strict_sema_generation_uses_one_exact_published_producer_train() {
+    let fixture = RepositoryFixture::current();
+    let cargo = fixture.cargo_toml();
+
+    for exact_dependency in [
+        "core-ethos = { git = \"https://github.com/LiGoldragon/core-ethos.git\", rev = \"7a1384874f3747de97c6ccbb4ae6fa2149b27330\" }",
+        "core-nomos = { git = \"https://github.com/LiGoldragon/core-nomos.git\", rev = \"4758e8db3c72e7c84c30c1a0b597b6d9ed65d35d\" }",
+        "schema-rust = { git = \"https://github.com/LiGoldragon/schema-rust.git\", rev = \"c1d2ae1b0dd189cd8c8788a2cfc062e26c0377f3\", default-features = false }",
+        "sema-translator = { git = \"https://github.com/LiGoldragon/sema-translator.git\", rev = \"4675e5ddfdd0d24144498ec9b7d2e5b9cb422249\", default-features = false, features = [\"bootstrap\"] }",
+    ] {
+        assert!(
+            cargo.contains(exact_dependency),
+            "strict Sema consumer omitted exact producer {exact_dependency}"
+        );
+    }
+}
+
+#[test]
+fn current_sema_source_is_the_only_live_schema_document() {
+    let fixture = RepositoryFixture::current();
+
+    assert!(fixture.has_file("schema/witness.sema"));
+    assert!(fixture.has_file("tests/fixtures/generated_sema_table.rs"));
+    assert!(!fixture.has_file("schema/sema-engine.concept.schema"));
+}
+
+#[test]
 fn sema_engine_does_not_depend_on_raw_redb_directly() {
     let fixture = RepositoryFixture::current();
     let cargo = fixture.cargo_toml();

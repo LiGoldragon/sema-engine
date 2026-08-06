@@ -1,72 +1,66 @@
-use sema_engine::{
-    Engine, EngineOpen, RecordKey, Result, SchemaHash, SchemaVersion, TableName, TableSpecification,
-};
+use sema_engine::{Engine, EngineOpen, SchemaVersion, TableSpecification};
 
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-struct Domain(String);
+mod support;
 
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-struct StoredRecord {
-    identifier: u64,
-    body: String,
+#[allow(non_camel_case_types)]
+mod generated {
+    include!("fixtures/generated_sema_table.rs");
 }
 
-struct Records;
+use generated::{z2VKo1, z2VKo2, z2VKo3};
 
-impl TableSpecification for Records {
-    type Record = StoredRecord;
-    type Key = Domain;
-
-    const TABLE_NAME: TableName = TableName::new("records");
-    const FAMILY_NAME: &'static str = "zRecordsStableIdentity";
-    const SCHEMA_HASH: SchemaHash = SchemaHash::new([7; 32]);
-
-    fn record_key(key: &Self::Key) -> Result<RecordKey> {
-        Ok(RecordKey::new(key.0.clone()))
-    }
+#[test]
+fn checked_sema_source_and_generated_rust_are_fresh() {
+    let generated = support::generated_sema_table();
+    generated
+        .write_or_check(support::UPDATE_VARIABLE)
+        .expect("checked Sema and Rust projections are fresh");
+    let table_identity = support::generated_identity(102);
+    assert_eq!(z2VKo3::TABLE_NAME.as_str(), table_identity.as_str());
 }
 
 #[test]
-fn generated_style_table_specification_writes_and_reads_a_typed_domain_key() {
+fn generated_domain_snapshot_table_writes_and_reads_a_typed_domain_key() {
     let temporary = tempfile::tempdir().expect("fresh Sema directory");
     let path = temporary.path().join("generated-table.sema");
     let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1)))
         .expect("fresh redb-backed Sema opens");
     engine
-        .register_table(Records::descriptor())
+        .register_table(z2VKo3::descriptor())
         .expect("generated table registers");
 
-    let domain = Domain("software/code-generation".to_owned());
+    let domain = z2VKo1::new("software/code-generation".to_owned());
     assert_eq!(
-        Records::record_key(&domain)
+        z2VKo3::record_key(&domain)
             .expect("generated source key projection")
             .to_owned_string(),
         "software/code-generation"
     );
-    let stored = StoredRecord {
-        identifier: 17,
-        body: "typed value".to_owned(),
+    let domain_snapshot = z2VKo2 {
+        field_0: domain.clone(),
+        field_1: 17,
+        field_2: "typed value".to_owned(),
     };
     engine
-        .assert_keyed(Records::assertion(&domain, stored.clone()).expect("typed assertion"))
+        .assert_keyed(z2VKo3::assertion(&domain, domain_snapshot.clone()).expect("typed assertion"))
         .expect("record commits through sema-engine");
     let snapshot = engine
-        .match_records(Records::query(&domain).expect("typed key query"))
+        .match_records(z2VKo3::query(&domain).expect("typed key query"))
         .expect("record reads through sema-engine");
 
-    assert_eq!(snapshot.records(), std::slice::from_ref(&stored));
+    assert_eq!(snapshot.records(), std::slice::from_ref(&domain_snapshot));
     drop(engine);
 
     let mut reopened = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1)))
         .expect("redb-backed Sema reopens");
     reopened
-        .register_table(Records::descriptor())
+        .register_table(z2VKo3::descriptor())
         .expect("generated table re-registers");
     assert_eq!(
         reopened
-            .match_records(Records::query(&domain).expect("typed reopen query"))
+            .match_records(z2VKo3::query(&domain).expect("typed reopen query"))
             .expect("persisted record reads")
             .records(),
-        &[stored],
+        &[domain_snapshot],
     );
 }

@@ -1,0 +1,6 @@
+Sema.{1 0 0}
+[]
+{
+  [Domain.String DomainSnapshot.{Domain Integer String}]
+  [domain_snapshots.{DomainSnapshot Domain}]
+}

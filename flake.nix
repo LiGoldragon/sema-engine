@@ -29,10 +29,16 @@
           "ARCHITECTURE.md"
           "skills.md"
         ];
+        schemaRoot = toString ./schema;
+        protosSource = path: _type:
+          let candidate = toString path; in
+          candidate == schemaRoot || pkgs.lib.hasPrefix "${schemaRoot}/" candidate;
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           filter = path: type:
-            (craneLib.filterCargoSources path type) || (repoContextFile path type);
+            (craneLib.filterCargoSources path type)
+            || (repoContextFile path type)
+            || (protosSource path type);
         };
         commonArgs = {
           inherit src;
