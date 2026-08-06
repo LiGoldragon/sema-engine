@@ -232,10 +232,10 @@ impl<'engine> Outbox<'engine> {
                 acknowledged: head.entry_digest(),
             });
         }
-        if let Some(current) = self.mirror_head()? {
-            if sequence <= current.commit_sequence() {
-                return Ok(MirrorAcknowledgement::Unchanged(current));
-            }
+        if let Some(current) = self.mirror_head()?
+            && sequence <= current.commit_sequence()
+        {
+            return Ok(MirrorAcknowledgement::Unchanged(current));
         }
         self.storage
             .write(|transaction| MIRROR_CURSOR.insert(transaction, MIRROR_SHIPPED_KEY, &head))?;

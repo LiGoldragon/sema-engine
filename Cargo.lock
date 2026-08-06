@@ -122,8 +122,8 @@ dependencies = [
 
 [[package]]
 name = "core-ethos"
-version = "0.28.0"
-source = "git+https://github.com/LiGoldragon/core-ethos.git?rev=249ed6ac5b8a3a84fee5884bcb35b929f07e9166#249ed6ac5b8a3a84fee5884bcb35b929f07e9166"
+version = "0.29.0"
+source = "git+https://github.com/LiGoldragon/core-ethos.git?rev=427fd74a8217f557cfabdfe0ff23b784c855bf85#427fd74a8217f557cfabdfe0ff23b784c855bf85"
 dependencies = [
  "name-table 0.3.0",
  "raw-discovery",
@@ -135,8 +135,8 @@ dependencies = [
 
 [[package]]
 name = "core-logos"
-version = "0.25.0"
-source = "git+https://github.com/LiGoldragon/core-logos.git?rev=abee4036fbeb58c767ef7dc3489804e2afd5c6e1#abee4036fbeb58c767ef7dc3489804e2afd5c6e1"
+version = "0.26.0"
+source = "git+https://github.com/LiGoldragon/core-logos.git?rev=f3655c5ba60d2aec5a6bffa0962eef6b5964ee4e#f3655c5ba60d2aec5a6bffa0962eef6b5964ee4e"
 dependencies = [
  "content-identity 0.3.0",
  "content-identity 0.5.0",
@@ -152,8 +152,8 @@ dependencies = [
 
 [[package]]
 name = "core-nomos"
-version = "0.40.0"
-source = "git+https://github.com/LiGoldragon/core-nomos.git?rev=a5e9aeeed90445a7df57ee1c4fda8e4be761b985#a5e9aeeed90445a7df57ee1c4fda8e4be761b985"
+version = "0.41.0"
+source = "git+https://github.com/LiGoldragon/core-nomos.git?rev=ff675b264e3650afb88291036ec2bdd97292a2e7#ff675b264e3650afb88291036ec2bdd97292a2e7"
 dependencies = [
  "content-identity 0.5.0",
  "core-ethos",
@@ -483,8 +483,8 @@ dependencies = [
 
 [[package]]
 name = "rust-logos"
-version = "0.29.0"
-source = "git+https://github.com/LiGoldragon/rust-logos.git?rev=250e728fa9e5a02e3c9a6d4f0cfee0683863df83#250e728fa9e5a02e3c9a6d4f0cfee0683863df83"
+version = "0.30.0"
+source = "git+https://github.com/LiGoldragon/rust-logos.git?rev=55501fddc2d7e154d71fff1659386cbbba712267#55501fddc2d7e154d71fff1659386cbbba712267"
 dependencies = [
  "bs58",
  "core-logos",
@@ -533,8 +533,8 @@ dependencies = [
 
 [[package]]
 name = "schema-rust"
-version = "0.12.1"
-source = "git+https://github.com/LiGoldragon/schema-rust.git?rev=9bd0767a387774ea70f8cf4b9b5e3d3617cf7671#9bd0767a387774ea70f8cf4b9b5e3d3617cf7671"
+version = "0.13.0"
+source = "git+https://github.com/LiGoldragon/schema-rust.git?rev=3c122cb62301f0b77556c05bc270d79f64a8d6d3#3c122cb62301f0b77556c05bc270d79f64a8d6d3"
 dependencies = [
  "core-ethos",
  "core-nomos",
@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "sema-engine"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "blake3",
  "core-ethos",
@@ -583,8 +583,8 @@ dependencies = [
 
 [[package]]
 name = "sema-translator"
-version = "0.6.0"
-source = "git+https://github.com/LiGoldragon/sema-translator.git?rev=bc8410dfe4d449cc0e820a2c5b4d44496ad92acd#bc8410dfe4d449cc0e820a2c5b4d44496ad92acd"
+version = "0.7.0"
+source = "git+https://github.com/LiGoldragon/sema-translator.git?rev=6b5499c0d25c801b56582fdcd8e021c3293a6d4d#6b5499c0d25c801b56582fdcd8e021c3293a6d4d"
 dependencies = [
  "core-ethos",
  "name-table 0.3.0",
@@ -677,8 +677,8 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "structural-codec"
-version = "0.19.0"
-source = "git+https://github.com/LiGoldragon/structural-codec.git?rev=413e3744569ca237e837a1fd57d9ba6ad6adc3de#413e3744569ca237e837a1fd57d9ba6ad6adc3de"
+version = "0.20.0"
+source = "git+https://github.com/LiGoldragon/structural-codec.git?rev=879d76f91facedd6d5cbca79e282260e1beb9478#879d76f91facedd6d5cbca79e282260e1beb9478"
 dependencies = [
  "content-identity 0.3.0",
  "name-table 0.3.0",

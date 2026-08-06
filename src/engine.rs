@@ -1896,13 +1896,13 @@ impl Engine {
                 // no head ever recorded the rows are consumer-less vestige (an
                 // earlier engine wrote the outbox regardless of topology);
                 // compaction trims them with the covered history.
-                if let Some(head) = self.mirror_head()? {
-                    if let Some(entry) = self.unshipped_outbox()?.last() {
-                        return Err(Error::HistoryCompactionUnacknowledged {
-                            required: entry.commit_sequence().value(),
-                            acknowledged: Some(head.commit_sequence().value()),
-                        });
-                    }
+                if let Some(head) = self.mirror_head()?
+                    && let Some(entry) = self.unshipped_outbox()?.last()
+                {
+                    return Err(Error::HistoryCompactionUnacknowledged {
+                        required: entry.commit_sequence().value(),
+                        acknowledged: Some(head.commit_sequence().value()),
+                    });
                 }
                 Ok(())
             }

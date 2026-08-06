@@ -116,10 +116,10 @@ fn strict_sema_generation_uses_one_exact_published_producer_train() {
     let cargo = fixture.cargo_toml();
 
     for exact_dependency in [
-        "core-ethos = { git = \"https://github.com/LiGoldragon/core-ethos.git\", rev = \"249ed6ac5b8a3a84fee5884bcb35b929f07e9166\" }",
-        "core-nomos = { git = \"https://github.com/LiGoldragon/core-nomos.git\", rev = \"a5e9aeeed90445a7df57ee1c4fda8e4be761b985\" }",
-        "schema-rust = { git = \"https://github.com/LiGoldragon/schema-rust.git\", rev = \"9bd0767a387774ea70f8cf4b9b5e3d3617cf7671\", default-features = false }",
-        "sema-translator = { git = \"https://github.com/LiGoldragon/sema-translator.git\", rev = \"bc8410dfe4d449cc0e820a2c5b4d44496ad92acd\", default-features = false, features = [\"bootstrap\"] }",
+        "core-ethos = { git = \"https://github.com/LiGoldragon/core-ethos.git\", rev = \"427fd74a8217f557cfabdfe0ff23b784c855bf85\" }",
+        "core-nomos = { git = \"https://github.com/LiGoldragon/core-nomos.git\", rev = \"ff675b264e3650afb88291036ec2bdd97292a2e7\" }",
+        "schema-rust = { git = \"https://github.com/LiGoldragon/schema-rust.git\", rev = \"3c122cb62301f0b77556c05bc270d79f64a8d6d3\", default-features = false }",
+        "sema-translator = { git = \"https://github.com/LiGoldragon/sema-translator.git\", rev = \"6b5499c0d25c801b56582fdcd8e021c3293a6d4d\", default-features = false, features = [\"bootstrap\"] }",
     ] {
         assert!(
             cargo.contains(exact_dependency),
