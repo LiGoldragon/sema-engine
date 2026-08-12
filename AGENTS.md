@@ -31,3 +31,9 @@ Sema database-operation execution.
   binary absence, not only behavior tests.
 
 This repository is under fast development and constantly breaking.
+
+## Protos estate status
+
+Stack: correct-new destination
+Status: active component, current checkout legacy-wired
+This checkout is not proof of correct-new adoption.
